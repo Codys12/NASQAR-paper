@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from configs import parse_cmdline_configs, TrainerCLI_Config, Model_Config, Runtime_Config, Config
 import logging
 from functools import partial
+from typing import Callable
 
 logging.basicConfig(level=logging.INFO)
 
@@ -11,6 +12,9 @@ if __name__ == "__main__":
     from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
     import lightning as pl
     from lightning.pytorch.strategies.fsdp import FSDPStrategy
+
+    from transformers import AutoModelForCausalLM
+    from rwkv6attn import load_and_patch_model_with_attention_replacement
 
     rank_zero_info("########## work in progress ##########")
 
@@ -198,8 +202,11 @@ if __name__ == "__main__":
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
+            hf_path = teacher_config.model.hf_path
             classname = teacher_config.model.classname
-            if classname != '':
+            if hf_path != '':
+                teacher = AutoModelForCausalLM.from_pretrained(hf_path)
+            elif classname != '':
                 teacher_classpath = f'models.{classname}.Model_{classname}'
                 teacher_factory = locate(teacher_classpath)
                 if teacher_factory is None:
@@ -219,8 +226,15 @@ if __name__ == "__main__":
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
     if True:
+        attention_distillation_stage = config.train.attention_distillation_stage
+        hf_path = config.model.hf_path
         classname = config.model.classname
-        if classname != '':
+        if hf_path != '':
+            ReplacementSelfAttnType = locate(config.model.attn_path)
+            assert isinstance(ReplacementSelfAttnType, Callable)
+
+            model = load_and_patch_model_with_attention_replacement(hf_path, config.model.attn_classes_path, ReplacementSelfAttnType, attention_distillation_stage)
+        elif classname != '':
             model_classpath = f'models.{classname}.Model_{classname}'
             model_factory = locate(model_classpath)
             if model_factory is None:
@@ -314,3 +328,4 @@ if __name__ == "__main__":
     #if 'deepspeed_stage_3' in config.train.strategy and config.continued:
     #    ds_ckpt_path = config.train.load_model
     trainer.fit(wrapper, train_dataloaders=train_data_loader, val_dataloaders=validation_data_loader, ckpt_path=ds_ckpt_path)
+

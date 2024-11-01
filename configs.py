@@ -5,6 +5,9 @@ import typing
 @dataclass(kw_only=True)
 class Model_Config:
     hf_cfg:typing.Any = None
+    hf_path: str = ''
+    attn_path: str = 'rwkv6attn.RWKV6Attention'
+    attn_classes_path: str = 'transformers.models.qwen2.modeling_qwen2.QWEN2_ATTENTION_CLASSES' # 'transformers.models.llama.modeling_llama.LLAMA_ATTENTION_CLASSES' 
 
     classname: str = ''
     tmix: str = 'x060'

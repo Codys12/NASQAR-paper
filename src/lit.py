@@ -271,7 +271,23 @@ class LightningModelWrapper(pl.LightningModule):
 
         train_config = self.config.train
 
-        optim_groups = self.model.get_optim_groups()
+        if self.config.model.hf_path != '':
+            optim_groups = [
+                {
+                    "params": [
+                        p for n, p in self.model.named_parameters() if p.requires_grad # (n in decay_parameters and p.requires_grad)
+                    ],
+                    "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_1x',
+                },
+                # {
+                #     "params": [
+                #         p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+                #     ],
+                #     "weight_decay": 0.0,
+                # },
+            ]
+        else:
+            optim_groups = self.model.get_optim_groups()
 
         print("Configuring optimizers!!!")
 
@@ -310,20 +326,27 @@ class LightningModelWrapper(pl.LightningModule):
             output_attentions = stage == 1
             output_post_attention_hidden_states = stage == 2
             # special code for attention output and/or attention matrix loss
-            if self.config.model.classname != '':
+            if self.config.model.hf_path != '':
+                results = self.model.forward(x, output_hidden_states=False, output_attentions=True)
+                reported_loss = training_loss = torch.stack(results.attentions, dim=0).mean()
+                #reported_loss = results.loss
+            elif self.config.model.classname != '':
                 results = self.model.forward(x, output_hidden_states=False, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             else:
                 results = self.model.forward(x, return_dict=False, attention_mask=causal_mask, output_hidden_states=False, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
-            if stage == 1:
-                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0)).mean() / results.attentions[0].size(-1)
-            else: # stage == 2:
-                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+            if self.config.model.hf_path == '':
+                if stage == 1:
+                    reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0)).mean() / results.attentions[0].size(-1)
+                else: # stage == 2:
+                    reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
 
-        if self.config.model.classname != '':
+        if self.config.model.hf_path != '':
+            results = self.model(x, output_hidden_states=False)
+        elif self.config.model.classname != '':
             results = self.model(x, last_model_state, output_hidden_states=False)
         elif self.config.model.tmix.lower().startswith('qwen2'):
             results = self.model(x, attention_mask=causal_mask, output_hidden_states=False)
