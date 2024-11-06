@@ -68,7 +68,7 @@ if __name__ == "__main__":
 
     runtime_config.epoch_global_steps = EPOCH_SAMPLE_SIZE // runtime_config.global_step_bsz
     assert runtime_config.epoch_global_steps * runtime_config.global_step_bsz == EPOCH_SAMPLE_SIZE
-    if config.train.load_model == '' and config.train.train_stage >= 2:  # find latest saved model
+    if config.train.load_model == 'auto' and config.train.train_stage >= 2:  # find latest saved model
         list_p = []
         for p in os.listdir(config.runtime.proj_path):
             if p.startswith("rwkv") and p.endswith(".pth"):

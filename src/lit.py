@@ -148,6 +148,14 @@ class LightningModelWrapper(pl.LightningModule):
 
             save_dict = save(model)
 
+        # remove teacher attentions and move student attentions to self_attention after stage 2
+        if config.train.attention_distillation_stage == 2:
+            for k in list(save_dict.keys()):
+                if '.teacher_attn.' in k:
+                    del save_dict[k]
+                elif '.student_attn.' in k:
+                    save_dict[k.replace('.student_attn.', '.')] = save_dict.pop(k)
+
         if self.trainer.is_global_zero:
             torch.save(save_dict, path)
 
@@ -259,6 +267,7 @@ class LightningModelWrapper(pl.LightningModule):
                     load(child, prefix + name + ".")
 
         load(model, prefix="")
+        model.train()
         print("Loaded ", ckpt_path)       
 
     def forward(self, idx, last_model_state:ModelState|None = None):

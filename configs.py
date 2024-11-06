@@ -87,7 +87,7 @@ class Train_Config:
     teacher:TeacherConfig = None
     attention_distillation_stage:int = 0
 
-    load_model:str = ''
+    load_model:str = 'auto'
     wandb:str = ''
     proj_dir:str = 'out'
     proj_name:str = ''
