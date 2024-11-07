@@ -324,7 +324,8 @@ class LightningModelWrapper(pl.LightningModule):
 
 
     def _get_loss_logits_preds(self, batch, batch_idx, last_model_state):
-        x, y = batch
+        inputs, labels = batch
+        x, labels = batch
 
         B, T = x.shape
         causal_mask = torch.full((T, T), fill_value=-torch.inf, dtype=torch.bfloat16, device=x.device).triu(1)
@@ -350,7 +351,7 @@ class LightningModelWrapper(pl.LightningModule):
                 else: # stage == 2:
                     reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)
-            preds = torch.zeros_like(y)
+            preds = torch.zeros_like(labels)
             return reported_loss, training_loss, logits, preds, last_model_state
 
         if self.config.model.hf_path != '':
@@ -371,7 +372,17 @@ class LightningModelWrapper(pl.LightningModule):
             logits = results.logits
             next_model_state = last_model_state
     
-        reported_loss = training_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
+        # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
+        student_logits = logits
+        ce_loss = torch.tensor(0.0, device=student_logits.device, dtype=student_logits.dtype)
+        for b in range(student_logits.size(0)):
+            # NOTE - HF requires the labels be the same as the input_ids, which is essentially an off by one error on their part
+            ce_loss = ce_loss + F.cross_entropy(student_logits[b][..., :-1, :].view(-1, student_logits.size(-1)), labels[b][..., 1:].flatten())
+        ce_loss = ce_loss / student_logits.size(0)
+        if batch_idx % 10 == 0:
+            print("ce_loss", ce_loss.item())
+        reported_loss = training_loss = ce_loss
+
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 
@@ -385,15 +396,26 @@ class LightningModelWrapper(pl.LightningModule):
                     teacher_logits = teacher_results
                 else:
                     teacher_logits = teacher_results.logits
-            distillation_loss = F.kl_div(
-                F.log_softmax(logits.view(-1, logits.size(-1)), dim=-1),
-                F.log_softmax(teacher_logits.view(-1, logits.size(-1)), dim=-1),
-                log_target=True,
-                reduction='batchmean'
-            )
+
+            # memory saving measure, because otherwise kl_div tried to allocate everything all at once
+            distillation_loss = torch.tensor(0.0, device=student_logits.device, dtype=student_logits.dtype)
+            for b in range(student_logits.size(0)):
+                # FIXME - currently only supporting 100% KL loss, no CE loss
+
+                student_log_softmax = F.log_softmax(student_logits[b].view(-1, student_logits.size(-1)), dim=-1)
+                teacher_log_softmax = F.log_softmax(teacher_logits[b].view(-1, teacher_logits.size(-1)), dim=-1)
+                distillation_loss = distillation_loss + F.kl_div(
+                    student_log_softmax,
+                    teacher_log_softmax,
+                    log_target=True,
+                    reduction='batchmean'
+                )
+            distillation_loss = distillation_loss / student_logits.size(0)
+
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
             if self.config.train.teacher.ce_weight > 0:
                 training_loss = training_loss + reported_loss * self.config.train.teacher.ce_weight
+            reported_loss = training_loss
 
         if reported_loss.isinf().any():
             raise Exception("reported loss was infinite")
