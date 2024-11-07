@@ -376,8 +376,7 @@ class LightningModelWrapper(pl.LightningModule):
         student_logits = logits
         ce_loss = torch.tensor(0.0, device=student_logits.device, dtype=student_logits.dtype)
         for b in range(student_logits.size(0)):
-            # NOTE - HF requires the labels be the same as the input_ids, which is essentially an off by one error on their part
-            ce_loss = ce_loss + F.cross_entropy(student_logits[b][..., :-1, :].view(-1, student_logits.size(-1)), labels[b][..., 1:].flatten())
+            ce_loss = ce_loss + F.cross_entropy(student_logits[b].view(-1, student_logits.size(-1)), labels[b].flatten())
         ce_loss = ce_loss / student_logits.size(0)
         if batch_idx % 10 == 0:
             print("ce_loss", ce_loss.item())
