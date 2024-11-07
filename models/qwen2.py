@@ -318,7 +318,6 @@ class TMix_qwen2rwkv(TMix_qwen2):
         xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
 
         mr, mk, mv, mw, mg = xxx.unbind(dim=0)
-        #mr, mk, mv = xxx.unbind(dim=0)
         xr = x + dxprev * (self.time_maa_r + mr)
         xk = x + dxprev * (self.time_maa_k + mk)
         xv = x + dxprev * (self.time_maa_v + mv)
@@ -328,10 +327,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         query_states = self.q_proj(xr)
         key_states = self.k_proj(xk)
         value_states = self.v_proj(xv)
-        #decay_states = self.time_decay.view(1,1,H,1).expand(bsz,q_len,H,1).contiguous()
         decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
-        #g = F.silu(self.gate(xg))
-        g = F.sigmoid(torch.tanh(xg @ self.gate_w1) @ self.gate_w2)
+        gate_states = F.sigmoid(torch.tanh(xg @ self.gate_w1) @ self.gate_w2)
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -344,14 +341,9 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #dropout_rate = 0.0 if not self.training else self.attention_dropout
 
         decay_states_log = -decay_states.float().exp()
-        decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
+        #decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
         key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
 
-        # kv_seq_len = key_states.shape[-2]
-        # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)#, position_ids)
-        #cos, sin = shared.angles.unbind(0)
-        #query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         query_states = query_states.to(value_states.dtype)
         key_states = key_states.to(value_states.dtype)
 
@@ -392,7 +384,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
             #attn_output = self.ln_x(attn_output)
-            attn_output = self.o_proj(attn_output * g)
+            attn_output = self.o_proj(attn_output * gate_states)
         else:
             attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
 
