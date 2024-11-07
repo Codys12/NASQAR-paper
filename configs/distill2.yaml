@@ -3,6 +3,8 @@ train:
   train_stage: 3
   load_partial: 1
 
+  load_model: ""
+
   data_type: "binidx" 
   data_file: "data/dclm-10B" #data/minipile_qwen2" 
   my_exit_tokens: 100000000 # 1491785955
@@ -13,7 +15,7 @@ train:
   magic_prime: 2929793 # 2913641 # 364193
 
   lr_init: 1e-3
-  lr_final: 1e-4
+  lr_final: 1e-5
   warmup_steps: 50
   beta1: 0.9 
   beta2: 0.95
@@ -25,7 +27,7 @@ train:
   micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
   strategy: deepspeed_stage_1
-  grad_cp: 1
+  grad_cp: 0
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
     
   attention_distillation_stage: 2
