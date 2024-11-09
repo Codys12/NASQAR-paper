@@ -74,7 +74,8 @@ class InferenceConfig:
     train:typing.Any = None
     model: Model_Config
     path:str = ''
-
+    hf_path: str = ''
+    
 @dataclass(kw_only=True)
 class TeacherConfig(InferenceConfig):
     kl_weight:float = 0.5
