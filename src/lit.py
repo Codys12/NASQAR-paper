@@ -378,8 +378,6 @@ class LightningModelWrapper(pl.LightningModule):
         for b in range(student_logits.size(0)):
             ce_loss = ce_loss + F.cross_entropy(student_logits[b].view(-1, student_logits.size(-1)), labels[b].flatten())
         ce_loss = ce_loss / student_logits.size(0)
-        if batch_idx % 10 == 0:
-            print("ce_loss", ce_loss.item())
         reported_loss = training_loss = ce_loss
 
         with torch.no_grad():
@@ -399,8 +397,6 @@ class LightningModelWrapper(pl.LightningModule):
             # memory saving measure, because otherwise kl_div tried to allocate everything all at once
             distillation_loss = torch.tensor(0.0, device=student_logits.device, dtype=student_logits.dtype)
             for b in range(student_logits.size(0)):
-                # FIXME - currently only supporting 100% KL loss, no CE loss
-
                 student_log_softmax = F.log_softmax(student_logits[b].view(-1, student_logits.size(-1)), dim=-1)
                 teacher_log_softmax = F.log_softmax(teacher_logits[b].view(-1, teacher_logits.size(-1)), dim=-1)
                 distillation_loss = distillation_loss + F.kl_div(
@@ -413,8 +409,10 @@ class LightningModelWrapper(pl.LightningModule):
 
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
             if self.config.train.teacher.ce_weight > 0:
-                training_loss = training_loss + reported_loss * self.config.train.teacher.ce_weight
+                training_loss = training_loss + ce_loss * self.config.train.teacher.ce_weight
             reported_loss = training_loss
+            if batch_idx % 10 == 0:
+                print(f"kl_div:{distillation_loss.item()}, ce_loss:{ce_loss.item()}")
 
         if reported_loss.isinf().any():
             raise Exception("reported loss was infinite")
