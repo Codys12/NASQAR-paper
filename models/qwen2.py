@@ -22,23 +22,6 @@ if importlib.util.find_spec('deepspeed'):
 
 from src.logger import print0 as print
 
-from fla.ops.simple_gla.chunk import chunk_simple_gla, SimpleGLAFunction
-
-def fla_chunk_simple_gla(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,  # log decay
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert q.dim() == k.dim() == v.dim() == 4, "q, k, v must have 4 dimensions (b, h, l, d)"
-    assert q.dtype == k.dtype == v.dtype, "q, k, v must have the same dtype"
-    scale = k.shape[-1] ** -0.5
-    g = g.float()
-    initial_state = None
-    output_final_state = False
-    o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
-    return o, final_state
-
 from fla.ops.gla.chunk import chunk_gla, ChunkGLAFunction
 
 def fla_chunk_gla(

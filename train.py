@@ -157,7 +157,6 @@ if __name__ == "__main__":
 
     from src.lit import LightningModelWrapper
     from src.model import Transformer
-    from qwen2.modeling_qwen2 import Qwen2ForCausalLM
     from qwen2.configuration_qwen2 import Qwen2Config
 
     from safetensors.torch import load_file
@@ -214,6 +213,7 @@ if __name__ == "__main__":
                     exit(0)
                 teacher = teacher_factory(teacher_config)
             elif teacher_config.model.tmix.startswith('qwen2'):
+                from qwen2.modeling_qwen2 import Qwen2ForCausalLM
                 teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
             else:
                 teacher = Transformer(teacher_config)
@@ -242,6 +242,7 @@ if __name__ == "__main__":
                 exit(0)
             model = model_factory(config)
         elif config.model.tmix.startswith('qwen2'):
+            from qwen2.modeling_qwen2 import Qwen2ForCausalLM
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
