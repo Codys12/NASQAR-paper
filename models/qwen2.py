@@ -275,10 +275,10 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
             # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
 
-        self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         # start gate out with no effect
         nn.init.zeros_(self.gate.weight)
-        nn.init.ones_(self.gate.bias)
+        #nn.init.ones_(self.gate.bias)
 
         #self.ln_x = nn.LayerNorm(dim_att)
 
@@ -308,7 +308,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
         key_states = self.k_proj(xk)
         value_states = self.v_proj(xv)
         decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
-        gate_states = F.silu(self.gate(xg))
+        gate_states = torch.sigmoid(self.gate(xg))
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
