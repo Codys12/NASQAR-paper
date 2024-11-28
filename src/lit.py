@@ -122,8 +122,10 @@ class LightningModelWrapper(pl.LightningModule):
             save_dict = model.state_dict()
             if self.trainer.local_rank == 0:
                 for k in list(save_dict.keys()):
-                    if k.startswith('model.'):
-                        save_dict[k[len('model.'):]] = save_dict[k]
+                    if k.startswith('teacher.'):
+                        del save_dict[k]
+                    elif k.startswith('model.'):
+                        save_dict[k[len('model.'):]] = save_dict[k].bfloat16()
                         del save_dict[k]
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
@@ -267,7 +269,6 @@ class LightningModelWrapper(pl.LightningModule):
                     load(child, prefix + name + ".")
 
         load(model, prefix="")
-        model.train()
         print("Loaded ", ckpt_path)       
 
     def forward(self, idx, last_model_state:ModelState|None = None):
