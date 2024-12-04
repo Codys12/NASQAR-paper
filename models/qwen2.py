@@ -22,20 +22,8 @@ if importlib.util.find_spec('deepspeed'):
 
 from src.logger import print0 as print
 
-from fla.ops.gla.chunk import chunk_gla, ChunkGLAFunction
-
-def fla_chunk_gla(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,  # log decay
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    scale = q.shape[-1] ** -0.5
-    g = g.float()
-    initial_state = None
-    output_final_state = False
-    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
-    return o, final_state
+from fla.ops.gla.chunk import chunk_gla
+from fla.ops.gla.fused_recurrent import fused_recurrent_gla
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -360,7 +348,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_weights = torch.empty(0, device=x.device)
 
             #attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
-            attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
+            #attn_output = chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
+            attn_output = fused_recurrent_gla(query_states, key_states, value_states, decay_states_log)[0]
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
             #attn_output = self.ln_x(attn_output)
