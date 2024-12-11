@@ -371,8 +371,22 @@ class LightningModelWrapper(pl.LightningModule):
         else:
             logits = results.logits
             next_model_state = last_model_state
-    
-        reported_loss = training_loss = ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
+
+        chunk_loss_calcs = self.config.train.attention_distillation_stage == 0
+        if not chunk_loss_calcs:
+            reported_loss = training_loss = ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
+        else:
+            # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
+            flat_student_logits = logits.view(-1, logits.size(-1))
+            flat_labels = y.view(-1)
+            chunk_len = 512
+            n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
+            ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+            for c in range(0, flat_student_logits.size(0), chunk_len):
+                ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
+            ce_loss = ce_loss / n_chunks
+            reported_loss = training_loss = ce_loss
+        
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 
@@ -386,12 +400,28 @@ class LightningModelWrapper(pl.LightningModule):
                     teacher_logits = teacher_results
                 else:
                     teacher_logits = teacher_results.logits
-            distillation_loss = F.kl_div(
-                F.log_softmax(logits.view(-1, logits.size(-1)), dim=-1),
-                F.log_softmax(teacher_logits.view(-1, logits.size(-1)), dim=-1),
+                flat_teacher_logits = teacher_logits.view(-1, teacher_logits.size(-1))
+            if not chunk_loss_calcs:
+                distillation_loss = F.kl_div(
+                F.log_softmax(flat_student_logits, dim=-1),
+                F.log_softmax(flat_teacher_logits, dim=-1),
                     log_target=True,
                     reduction='batchmean'
                 )
+            else:
+                # memory saving measure, because otherwise kl_div tried to allocate everything all at once
+                distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+                for c in range(0, flat_student_logits.size(0), chunk_len):
+                        student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
+                        teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                        distillation_loss = distillation_loss + F.kl_div(
+                            student_log_softmax,
+                            teacher_log_softmax,
+                            log_target=True,
+                            reduction='batchmean'
+                        )
+                distillation_loss = distillation_loss / n_chunks
+            
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
             if self.config.train.teacher.ce_weight > 0:
                 training_loss = training_loss + ce_loss * self.config.train.teacher.ce_weight
