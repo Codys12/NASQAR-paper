@@ -64,7 +64,7 @@ if __name__ == "__main__":
     assert config.train.train_stage >= -1
 
     EPOCH_SAMPLE_SIZE = 40320
-    runtime_config.epoch_count = config.train.magic_prime // EPOCH_SAMPLE_SIZE
+    runtime_config.epoch_count = max(1, config.train.magic_prime // EPOCH_SAMPLE_SIZE)
 
     runtime_config.epoch_global_steps = EPOCH_SAMPLE_SIZE // runtime_config.global_step_bsz
     assert runtime_config.epoch_global_steps * runtime_config.global_step_bsz == EPOCH_SAMPLE_SIZE

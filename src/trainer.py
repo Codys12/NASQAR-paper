@@ -48,7 +48,8 @@ class train_callback(pl.Callback):
                     print("bad lr_decay_type specified")
                     exit()
 
-            if lr_progress >= 1:
+            real_progress = pl_module.get_real_progress()
+            if real_progress >= 1:
                 pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
                 print("!!!TRAINING COMPLETE!!!")
                 exit(0)
