@@ -93,8 +93,8 @@ def is_prime(n):
 
 ########################################################################################################
 
-if len(sys.argv) not in [4, 5, 6] or sys.argv[1].strip() not in ['check', 'build']:
-    print('Usage: python make_data_hf.py check|build HF_DATASET_NAME CTX_LEN [COLUMN_NAME] [MAX_TOKENS]')
+if len(sys.argv) not in [4, 5, 6] or sys.argv[1].strip() not in ['check', 'build', 'fixeos']:
+    print('Usage: python make_data_hf.py check|build|fixeos HF_DATASET_NAME CTX_LEN [COLUMN_NAME] [MAX_TOKENS]')
     exit()
 
 command = sys.argv[1].strip()
@@ -158,6 +158,19 @@ if command == 'build':
     builder.finalize((f"{OUT_NAME}.idx"))
     print("done")
 
+if command == 'fixeos':
+    data = MMapIndexedDataset(OUT_NAME)
+    data_len = len(data)
+    bin_buffer_mmap = np.memmap(OUT_NAME + '.bin', dtype=np.int32, mode="r+", order="C")
+    for idx in range(data_len):
+        ptr, size = data._index[idx]
+        if bin_buffer_mmap[ptr//4 + size - 1] != 0:
+            print("expected to convert EOS 0 but found", bin_buffer_mmap[ptr//4 + size - 1])
+        assert bin_buffer_mmap[ptr//4 + size - 1] == 0
+        bin_buffer_mmap[ptr//4 + size - 1] = tokenizer.eos_token_id
+    bin_buffer_mmap.flush()
+
+
 
 print("### Verifying result...")
 data = MMapIndexedDataset(OUT_NAME)
@@ -170,6 +183,8 @@ for idx in TODO:
     ptr, size = data._index[idx]
     dix = data.get(idx=idx, offset=0, length=size).astype(int)
     print("-" * 70 + f"[{OUT_NAME} idx {idx} sz {size}]")
+    if dix[-1] != tokenizer.eos_token_id:
+        print("end token was ", dix[-1], " instead of EOS:", tokenizer.eos_token_id)
     assert dix[-1] == tokenizer.eos_token_id
     dix = dix[:-1]
     if len(dix) > PREVIEW_LIMIT:
