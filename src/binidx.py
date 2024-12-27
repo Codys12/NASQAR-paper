@@ -1,4 +1,4 @@
-from lib2to3.pgen2 import token
+#from lib2to3.pgen2 import token
 import os
 import torch
 import numpy as np
