@@ -372,13 +372,14 @@ class LightningModelWrapper(pl.LightningModule):
             logits = results.logits
             next_model_state = last_model_state
 
+        flat_student_logits = logits.view(-1, logits.size(-1))
+        flat_labels = y.view(-1)
+
         chunk_loss_calcs = self.config.train.attention_distillation_stage == 0
         if not chunk_loss_calcs:
-            reported_loss = training_loss = ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
+            reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
         else:
             # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
-            flat_student_logits = logits.view(-1, logits.size(-1))
-            flat_labels = y.view(-1)
             chunk_len = 512
             n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
             ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
