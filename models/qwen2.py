@@ -22,52 +22,168 @@ if importlib.util.find_spec('deepspeed'):
 
 from src.logger import print0 as print
 
-try:
+ATTENTION_TYPE = os.environ["RWKV_ATTENTION_TYPE"]
+assert ATTENTION_TYPE in ['rwkv6', 'rwkv7']
+if ATTENTION_TYPE == 'rwkv6':
     from fla.ops.gla.chunk import chunk_gla
     from fla.ops.gla.fused_recurrent import fused_recurrent_gla
-except:
-    pass
 
+elif ATTENTION_TYPE == 'rwkv7':
+    HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE_A"])
+    CTX_LEN = int(os.environ["RWKV_CTXLEN"])
 
-HEAD_SIZE = 64 #cmd_args.headsz
-sequence_length = 1024
+    from torch.utils.cpp_extension import load
 
-from torch.utils.cpp_extension import load
+    v7_kernel_version ='wind_triton_bighead'
 
-if True:
-    CHUNK_LEN = 16
+    if v7_kernel_version == 'wind_triton':
+        from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
+    elif v7_kernel_version == 'wind_triton_bighead':
+        from rwkv7_attn_triton_bighead import attn_triton_bighead as RUN_CUDA_RWKV7g
+    elif v7_kernel_version == 'wind_cuda':
+        CHUNK_LEN = 16
 
-    flags = ['-res-usage', f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
-    VERSION = 1 if HEAD_SIZE < 128 else 2
-    load(name="wind_backstepping", sources=[f'cuda/rwkv_cuda_wind/backstepping_f32_{VERSION}.cu', 'cuda/rwkv_cuda_wind/backstepping_f32.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        flags = [f'-D_C_={HEAD_SIZE}', "-O3"]
+        if torch.cuda.is_available():
+            if torch.version.hip:
+                flags += ["--save-temps"]
+            else:
+                flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
-    class WindBackstepping(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, w,q,k,v,z,b):
-            B,T,H,C = w.shape 
-            assert T%CHUNK_LEN == 0
-            assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
-            w,q,k,v,z,b = [i.contiguous() for i in [w,q,k,v,z,b]]
-            y = torch.empty_like(v)
-            s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
-            sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
-            torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
-            ctx.save_for_backward(w,q,k,v,z,b,s,sa)
-            return y
-        @staticmethod
-        def backward(ctx, dy):
-            assert dy.dtype == torch.bfloat16
-            dy = dy.contiguous()
-            w,q,k,v,z,b,s,sa = ctx.saved_tensors
-            dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
-            torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
-            return dw,dq,dk,dv,dz,db
+        load(name="wind", sources=['rwkv_cuda_wind/wind_rwkv7_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
 
-    def RUN_CUDA_RWKV7g(q,w,k,v,a,b) -> torch.Tensor:
-        B,T,HC = q.shape
-        q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
-        return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
+        class WindRWKV7(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx,w,q,k,v,a,b):
+                B,T,H,C = w.shape
+                s0 = torch.zeros(B,H,C,C,dtype=w.dtype,device=w.device)
+                assert T%16 == 0
+                assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,a,b,s0])
+                w,q,k,v,a,b,s0 = [i.contiguous() for i in [w,q,k,v,a,b,s0]]
+                y = torch.empty_like(v)
+                sT = torch.empty_like(s0)
+                s = torch.zeros(B,H,T//16,C,C, dtype=w.dtype,device=w.device)
+                torch.ops.wind.forward(w,q,k,v,a,b, s0,y,s,sT)
+                ctx.save_for_backward(w,q,k,v,a,b,s)
+                return y
+            
+            @staticmethod
+            def backward(ctx,dy):
+                w,q,k,v,a,b,s = ctx.saved_tensors
+                B,T,H,C = w.shape
+                dsT = torch.zeros(B,H,C,C,dtype=dy.dtype,device=dy.device)
+                assert all(i.dtype==torch.bfloat16 for i in [dy])
+                dy,dsT = [i.contiguous() for i in [dy,dsT]]
+                dw,dq,dk,dv,da,db,ds0 = [torch.empty_like(x) for x in [w,q,k,v,a,b,dsT]]
+                torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
+                return dw,dq,dk,dv,da,db
 
+        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
+            B,T,HC = q.shape
+            q,w,k,v,a,b = [i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE) for i in [q,w,k,v,a,b]]
+            return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)
+            
+    elif v7_kernel_version == 'wind_backstepping':
+        CHUNK_LEN = 16
+
+        flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
+        if torch.cuda.is_available():
+            if torch.version.hip:
+                flags += ["--save-temps"]
+            else:
+                flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
+
+        VERSION = 1 if HEAD_SIZE < 128 else 2
+        load(name="wind_backstepping", sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+
+        class WindBackstepping(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, w,q,k,v,z,b):
+                B,T,H,C = w.shape 
+                assert T%CHUNK_LEN == 0
+                assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
+                w,q,k,v,z,b = [i.contiguous() for i in [w,q,k,v,z,b]]
+                y = torch.empty_like(v)
+                s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
+                sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
+                torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
+                ctx.save_for_backward(w,q,k,v,z,b,s,sa)
+                return y
+            @staticmethod
+            def backward(ctx, dy):
+                assert dy.dtype == torch.bfloat16
+                dy = dy.contiguous()
+                w,q,k,v,z,b,s,sa = ctx.saved_tensors
+                dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
+                torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
+                return dw,dq,dk,dv,dz,db
+
+        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
+            B,T,HC = q.shape
+            q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
+            return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
+    elif v7_kernel_version == 'cuda':
+        DTYPE = torch.bfloat16
+        XTYPE = torch.float
+        T = CTX_LEN
+        CHUNK_LEN = 16
+
+        flags = [f'-D_N_={HEAD_SIZE}', f'-D_T_={T}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
+        if torch.cuda.is_available():
+            if torch.version.hip:
+                flags += ["--save-temps"]
+            else:
+                flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
+
+        load(name="wkv7g", sources=["cuda/wkv7g_op.cpp", f"cuda/wkv7g_v1.cu"], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        class WKV_7g(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, r, w, k, v, a, b):
+                with torch.no_grad():
+                    B, T, C = r.size()
+                    H = C // HEAD_SIZE
+                    N = HEAD_SIZE
+                    A = T // CHUNK_LEN
+                    assert HEAD_SIZE == C // H
+                    assert T % CHUNK_LEN == 0
+                    assert all(i.dtype == DTYPE for i in [r,w,k,v,a,b])
+                    r,w,k,v,a,b = [i.contiguous() for i in [r,w,k,v,a,b]]
+                    ctx.B = B
+                    ctx.T = T
+                    ctx.C = C
+                    ctx.H = H
+                    y = torch.empty((B, T, C), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    saa = torch.empty((B, T, H, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    sss = torch.empty((B, H, A, N, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    torch.ops.wkv7g.forward(B, T, C, H, r, w, k, v, a, b, y, saa, sss)
+                    ctx.save_for_backward(r, w, k, v, a, b, saa, sss)
+                    return y
+            @staticmethod
+            def backward(ctx, gy):
+                with torch.no_grad():
+                    N = HEAD_SIZE
+                    B = ctx.B
+                    T = ctx.T
+                    C = ctx.C
+                    H = ctx.H
+                    A = T // CHUNK_LEN
+                    assert gy.dtype == DTYPE
+                    gy = gy.contiguous()
+                    r, w, k, v, a, b, saa, sss = ctx.saved_tensors
+                    gr = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gw = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gk = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gv = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    ga = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    gb = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    zzz = torch.empty((B, H, A-1, N, N), device=gy.device, dtype=XTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    torch.ops.wkv7g.backward(B, T, C, H, r, w, k, v, a, b, saa, sss, zzz, gy, gr, gw, gk, gv, ga, gb)
+                    del saa
+                    del sss
+                    del zzz
+                    return (gr, gw, gk, gv, ga, gb)
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
+            return WKV_7g.apply(r, w, k, v, a, b)      
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
@@ -472,16 +588,10 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         self.k_a = nn.Parameter(torch.empty(1,1,C))
         self.r_k = nn.Parameter(torch.empty(H,N))
 
-        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-        # self.receptance = nn.Linear(C, C, bias=config.attention_bias)
-        # self.key = nn.Linear(C, C, bias=config.attention_bias)
-        # self.value = nn.Linear(C, C, bias=config.attention_bias)
-        # self.output = nn.Linear(C, C, bias=config.attention_bias)
-
-        self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=attention_bias)
-        self.key = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
-        self.value = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
-        self.output = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=attention_output_bias)
+        # self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=attention_bias)
+        # self.key = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
+        # self.value = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
+        # self.output = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=attention_output_bias)
         self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
 
         num_hidden_layers = n_layer = self.config.n_layer
@@ -561,10 +671,10 @@ class TMix_qwen2rwkv7(TMix_qwen2):
             self.k_a.copy_(1.0)
             self.r_k.zero_()
 
-            module.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
-            module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(attention_hidden_size**0.5))
-            module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
-            module.output.weight.data.zero_()
+            # module.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
+            # module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(attention_hidden_size**0.5))
+            # module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
+            # module.output.weight.data.zero_()
 
     def forward(self, x, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
@@ -602,18 +712,18 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         xa = x+dxprev*self.x_a
         xg = x+dxprev*self.x_g
 
-        r = self.receptance(xr)
+        r = self.q_proj(xr)
         w = torch.tanh(xw @ self.w1) @ self.w2
-        k = self.key(xk)
-        v = self.value(xv)
+        k = self.k_proj(xk)
+        v = self.v_proj(xv)
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
         g = torch.sigmoid(xg @ self.g1) @ self.g2
 
         log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w)) # FIXME - we had tried 0-softplus before
 
         # repeat k/v heads if n_kv_heads < n_heads
-        k = k.view(B, T, 1, -1, self.head_dim).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(B, T, -1)
-        v = v.view(B, T, 1, -1, self.head_dim).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(B, T, -1)
+        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
 
         kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         k = k * (1 + (a-1) * self.k_a)
@@ -626,11 +736,11 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         #k = k * torch.clamp(log_neglog_w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), log_neglog_w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
+        x = RUN_CUDA_RWKV7g(r.bfloat16(), log_neglog_w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16(), self.head_dim)
 
         x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
-        x = self.output(x * g)
+        x = self.o_proj(x * g)
 
         if input_seq_len != T:
             x = x[:, :input_seq_len]

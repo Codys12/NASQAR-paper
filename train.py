@@ -44,6 +44,7 @@ if __name__ == "__main__":
     os.environ["RWKV_MODEL_TYPE"] = config.model.tmix
     os.environ["RWKV_CTXLEN"] = str(config.model.ctx_len)
     os.environ["RWKV_HEAD_SIZE_A"] = str(config.model.head_size)
+    os.environ["RWKV_ATTENTION_TYPE"] = config.model.attention_type
 
     model_name = f'{config.model.tmix}'
     if config.model.tmix2 != '':
