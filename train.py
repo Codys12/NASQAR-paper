@@ -14,7 +14,6 @@ if __name__ == "__main__":
     from lightning.pytorch.strategies.fsdp import FSDPStrategy
 
     from transformers import AutoModelForCausalLM
-    from rwkv6attn import load_and_patch_model_with_attention_replacement
 
     rank_zero_info("########## work in progress ##########")
 
@@ -234,6 +233,7 @@ if __name__ == "__main__":
             ReplacementSelfAttnType = locate(config.model.attn_path)
             assert isinstance(ReplacementSelfAttnType, Callable)
 
+            from rwkv6attn import load_and_patch_model_with_attention_replacement
             model = load_and_patch_model_with_attention_replacement(hf_path, config.model.attn_classes_path, ReplacementSelfAttnType, attention_distillation_stage)
         elif classname != '':
             model_classpath = f'models.{classname}.Model_{classname}'

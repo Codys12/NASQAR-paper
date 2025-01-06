@@ -34,13 +34,15 @@ elif ATTENTION_TYPE == 'rwkv7':
 
     from torch.utils.cpp_extension import load
 
-    v7_kernel_version ='wind_triton_bighead'
+    v7_kernel_version ='wind_cuda'
+    if torch.version.hip:
+        v7_kernel_version ='wind_triton_bighead'
 
     if v7_kernel_version == 'wind_triton':
         from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
     elif v7_kernel_version == 'wind_triton_bighead':
         from rwkv7_attn_triton_bighead import attn_triton_bighead as RUN_CUDA_RWKV7g
-    elif v7_kernel_version == 'wind_cuda':
+    elif v7_kernel_version in ('wind_cuda', 'wind_cuda_full'):
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', "-O3"]
@@ -50,7 +52,12 @@ elif ATTENTION_TYPE == 'rwkv7':
             else:
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
-        load(name="wind", sources=['rwkv_cuda_wind/wind_rwkv7_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        if v7_kernel_version == 'wind_cuda_full':
+            sources=['rwkv_cuda_wind/wind_rwkv7_full.cu']
+        else:
+            sources=['rwkv_cuda_wind/wind_rwkv7.cpp', 'rwkv_cuda_wind/wind_rwkv7.cu']
+
+        load(name="wind", sources=sources, is_python_module=False, verbose=True, extra_cuda_cflags=flags)
 
         class WindRWKV7(torch.autograd.Function):
             @staticmethod

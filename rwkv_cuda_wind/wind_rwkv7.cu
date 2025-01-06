@@ -1,6 +1,9 @@
+// Copyright (c) 2024, Johan Sokrates Wind
+
 #include "tile.cuh"
 #include <assert.h>
 typedef bf * __restrict__ F_;
+typedef float * __restrict__ F32_;
 
 constexpr int WARPS = _C_/16;
 constexpr int fw_stages = 1, bw_stages = 1;
@@ -62,8 +65,8 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
 
         RTile wq = (RTile)sq *     incl_pref, kwi = (RTile)sk * inv_incl_pref;
         RTile wa = (RTile)sa * non_incl_pref, bwi = (RTile)sb * inv_incl_pref;
-        FTile ab = sum_warp<1,WARPS>((float2*)share, tril<1>(wa % bwi));
-        RTile ak = sum_warp<1,WARPS>((float2*)share, tril<1>(wa % kwi));
+        FTile ab = sum_warp<1,WARPS>((float*)share, tril<1>(wa % bwi));
+        RTile ak = sum_warp<1,WARPS>((float*)share, tril<1>(wa % kwi));
 
         RTile ab_inv;
         __syncthreads();
@@ -77,8 +80,8 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
             ab_ut += state[i] % from_warp(wa, i, (float4*)share);
         RTile ut = FTile(ab_ut % ab_inv);
 
-        FTile y = sum_warp<1,WARPS>((float2*)share, tril<0>(wq % kwi)) % vt;
-        y +=      sum_warp<1,WARPS>((float2*)share, tril<0>(wq % bwi)) % ut;
+        FTile y = sum_warp<1,WARPS>((float*)share, tril<0>(wq % kwi)) % vt;
+        y +=      sum_warp<1,WARPS>((float*)share, tril<0>(wq % bwi)) % ut;
         for (int i = 0; i < WARPS; i++)
             y += from_warp(wq, i, (float4*)share) % state[i];
 
@@ -102,9 +105,9 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
     }
 }
 
-void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*s0, bf*y, bf*s, bf*sT) {
+void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*a, bf*b, bf*s0, bf*y, bf*s, bf*sT) {
     assert(T%16 == 0);
-    constexpr int tmp_size1 = sizeof(float4)*32, tmp_size2 = sizeof(float)*16*16*2;
+    constexpr int tmp_size1 = sizeof(float)*32*8*WARPS, tmp_size2 = sizeof(float)*16*16*2;
     constexpr int threads = 32*WARPS, shared_mem = sizeof(STile)*fw_stages*WARPS*6 + (tmp_size1 > tmp_size2 ? tmp_size1 : tmp_size2);
     static int reported = 0;
     if (!reported++) {
@@ -121,7 +124,7 @@ void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*s0
             assert(!cudaFuncSetAttribute(forward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
         }
     }
-    forward_kernel<<<dim3(H,B), dim3(threads), shared_mem>>>(T,H,w,q,k,v,z,a,s0,y,s,sT);
+    forward_kernel<<<dim3(H,B), dim3(threads), shared_mem>>>(T,H,w,q,k,v,a,b,s0,y,s,sT);
 }
 
 
@@ -146,7 +149,7 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
 
     auto push = [&](int t) {
         int off = bi*T*H*C + t*K*H*C + hi*C + warpi*16;
-        int si = t%fw_stages;
+        int si = t%bw_stages;
         sw_[si*WARPS+warpi] = GTile(w_+off, stride);
         sq_[si*WARPS+warpi] = GTile(q_+off, stride);
         sk_[si*WARPS+warpi] = GTile(k_+off, stride);
@@ -192,8 +195,8 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
 
         RTile wq = (RTile)sq *     incl_pref, kwi = (RTile)sk * inv_incl_pref;
         RTile wa = (RTile)sa * non_incl_pref, bwi = (RTile)sb * inv_incl_pref;
-        FTile ab = sum_warp<1,WARPS>((float2*)share, tril<1>(wa % bwi));
-        RTile ak = sum_warp<1,WARPS>((float2*)share, tril<1>(wa % kwi));
+        FTile ab = sum_warp<1,WARPS>((float*)share, tril<1>(wa % bwi));
+        RTile ak = sum_warp<1,WARPS>((float*)share, tril<1>(wa % kwi));
 
         RTile ab_inv;
         __syncthreads();
@@ -207,8 +210,13 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
             ab_ut += state[warpi*WARPS+i] % from_warp(wa, i, (float4*)share);
         RTile ut = FTile(ab_ut % ab_inv);
 
-        RTile qb = sum_warp<1,WARPS>((float2*)share, tril<0>(wq % bwi));
-        RTile qk = sum_warp<1,WARPS>((float2*)share, tril<0>(wq % kwi));
+        FTile y = sum_warp<1,WARPS>((float*)share, tril<0>(wq % kwi)) % vt;
+        y +=      sum_warp<1,WARPS>((float*)share, tril<0>(wq % bwi)) % ut;
+        for (int i = 0; i < WARPS; i++)
+            y += from_warp(wq, i, (float4*)share) % state[warpi*WARPS+i];
+
+        RTile qb = sum_warp<1,WARPS>((float*)share, tril<0>(wq % bwi));
+        RTile qk = sum_warp<1,WARPS>((float*)share, tril<0>(wq % kwi));
 
         RTile dyt = sdy.t();
         FTile dut = FTile(dyt % transpose(qb));
@@ -224,8 +232,8 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
         int off = bi*T*H*C + t*K*H*C + hi*C + warpi*16;
         GTile(dv_+off, stride) = RTile(dv);
 
-        FTile dab = sum_warp<1,WARPS>((float2*)share, tril<1>(transpose(dab_ut) % transpose(ut)));
-        FTile dak = sum_warp<1,WARPS>((float2*)share, tril<1>(transpose(dab_ut) % transpose(vt)));
+        FTile dab = sum_warp<1,WARPS>((float*)share, tril<1>(transpose(dab_ut) % transpose(ut)));
+        FTile dak = sum_warp<1,WARPS>((float*)share, tril<1>(transpose(dab_ut) % transpose(vt)));
         FTile dab_u_state0;
         dab_u_state0.zero_();
         for (int i = 0; i < WARPS; i++)
@@ -237,8 +245,8 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
         da = non_incl_pref * da;
         GTile(da_+off, stride) = RTile(da);
 
-        FTile dqb = sum_warp<1,WARPS>((float2*)share, tril<0>(transpose(dyt) % transpose(ut)));
-        FTile dqk = sum_warp<1,WARPS>((float2*)share, tril<0>(transpose(dyt) % transpose(vt)));
+        FTile dqb = sum_warp<1,WARPS>((float*)share, tril<0>(transpose(dyt) % transpose(ut)));
+        FTile dqk = sum_warp<1,WARPS>((float*)share, tril<0>(transpose(dyt) % transpose(vt)));
         FTile dy_state0;
         dy_state0.zero_();
         for (int i = 0; i < WARPS; i++)
@@ -273,7 +281,7 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
             RTile dstatei_t = transpose(dstatei);
             v_dstate += from_warp(transpose(vt), i, (float4*)share) % dstatei_t;
             u_dstate += from_warp(transpose(ut), i, (float4*)share) % dstatei_t;
-            dw += ones % transpose((RTile)state[i*WARPS+warpi]*dstatei);
+            dw += ones % ((RTile)state[i*WARPS+warpi].t()*dstatei_t);
         }
 
         FTile db = fw * u_dstate;
@@ -304,14 +312,12 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
         dw = dw * dw_fac;
         GTile(dw_+off, stride) = RTile(dw);
 
-        __syncthreads();
         for (int i = 0; i < WARPS; i++) {
             FTile ndstate = dstate[i] * from_warp(fw, i, (float4*)share);
             ndstate += dyt % from_warp(wqt, i, (float4*)share);
             ndstate += dab_ut % from_warp(wat, i, (float4*)share);
             dstate[i] = ndstate;
         }
-        __syncthreads();
     }
     for (int i = 0; i < WARPS; i++) {
         int off = bi*H*C*C + hi*C*C + warpi*16*C + i*16;
@@ -319,9 +325,9 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
     }
 }
 
-void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy, bf*s, bf*dsT, bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da, bf*ds0) {
+void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*a, bf*b, bf*dy, bf*s, bf*dsT, bf*dw, bf*dq, bf*dk, bf*dv, bf*da, bf*db, bf*ds0) {
     assert(T%16 == 0);
-    constexpr int tmp_size1 = sizeof(float4)*32*WARPS, tmp_size2 = sizeof(float)*16*16*2;
+    constexpr int tmp_size1 = sizeof(float)*32*8*WARPS, tmp_size2 = sizeof(float)*16*16*2;
     constexpr int threads = 32*WARPS, shared_mem = sizeof(STile)*WARPS*bw_stages*(7+WARPS) + (tmp_size1 > tmp_size2 ? tmp_size1 : tmp_size2);
     static int reported = 0;
     if (!reported++) {
@@ -338,5 +344,5 @@ void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*d
             assert(!cudaFuncSetAttribute(backward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
         }
     }
-    backward_kernel<<<dim3(H,B), dim3(threads), shared_mem>>>(T,H,w,q,k,v,z,a,dy,s,dsT,dw,dq,dk,dv,dz,da,ds0);
+    backward_kernel<<<dim3(H,B), dim3(threads), shared_mem>>>(T,H,w,q,k,v,a,b,dy,s,dsT,dw,dq,dk,dv,da,db,ds0);
 }
