@@ -34,10 +34,16 @@ elif ATTENTION_TYPE == 'rwkv7':
 
     from torch.utils.cpp_extension import load
 
-    v7_kernel_version ='wind_cuda'
-    if torch.version.hip:
+    v7_kernel_version ='fla_triton'
+    if torch.version.hip and v7_kernel_version != 'fla_triton':
         v7_kernel_version ='wind_triton_bighead'
 
+    if v7_kernel_version == 'fla_triton':
+        from fla.ops.rwkv7.chunk import chunk_rwkv7
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
+            B,T,HC = r.shape
+            r,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [r,w,k,v,a,b]]
+            return chunk_rwkv7(r, -w.exp().to(r), k, v, a, b, output_final_state=False)[0]
     if v7_kernel_version == 'wind_triton':
         from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
     elif v7_kernel_version == 'wind_triton_bighead':
@@ -87,7 +93,7 @@ elif ATTENTION_TYPE == 'rwkv7':
 
         def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
             B,T,HC = q.shape
-            q,w,k,v,a,b = [i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE) for i in [q,w,k,v,a,b]]
+            q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)
             
     elif v7_kernel_version == 'wind_backstepping':
@@ -127,7 +133,7 @@ elif ATTENTION_TYPE == 'rwkv7':
 
         def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
             B,T,HC = q.shape
-            q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
+            q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]
             return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
     elif v7_kernel_version == 'cuda':
         DTYPE = torch.bfloat16
@@ -145,13 +151,13 @@ elif ATTENTION_TYPE == 'rwkv7':
         load(name="wkv7g", sources=["cuda/wkv7g_op.cpp", f"cuda/wkv7g_v1.cu"], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
         class WKV_7g(torch.autograd.Function):
             @staticmethod
-            def forward(ctx, r, w, k, v, a, b):
+            def forward(ctx, r, w, k, v, a, b, head_dim:int):
                 with torch.no_grad():
                     B, T, C = r.size()
-                    H = C // HEAD_SIZE
-                    N = HEAD_SIZE
+                    H = C // head_dim
+                    N = head_dim
                     A = T // CHUNK_LEN
-                    assert HEAD_SIZE == C // H
+                    assert head_dim == C // H
                     assert T % CHUNK_LEN == 0
                     assert all(i.dtype == DTYPE for i in [r,w,k,v,a,b])
                     r,w,k,v,a,b = [i.contiguous() for i in [r,w,k,v,a,b]]
@@ -159,6 +165,7 @@ elif ATTENTION_TYPE == 'rwkv7':
                     ctx.T = T
                     ctx.C = C
                     ctx.H = H
+                    ctx.N = N
                     y = torch.empty((B, T, C), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     saa = torch.empty((B, T, H, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     sss = torch.empty((B, H, A, N, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
@@ -168,11 +175,11 @@ elif ATTENTION_TYPE == 'rwkv7':
             @staticmethod
             def backward(ctx, gy):
                 with torch.no_grad():
-                    N = HEAD_SIZE
                     B = ctx.B
                     T = ctx.T
                     C = ctx.C
                     H = ctx.H
+                    N = ctx.N
                     A = T // CHUNK_LEN
                     assert gy.dtype == DTYPE
                     gy = gy.contiguous()
@@ -190,7 +197,7 @@ elif ATTENTION_TYPE == 'rwkv7':
                     del zzz
                     return (gr, gw, gk, gv, ga, gb)
         def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
-            return WKV_7g.apply(r, w, k, v, a, b)      
+            return WKV_7g.apply(r, w, k, v, a, b, head_dim)      
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
