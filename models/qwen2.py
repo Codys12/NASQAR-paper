@@ -574,13 +574,39 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         lora_rank_iclr = calc_lora_rank(0.5, 1.8) # config.lora_rank_iclr or calc_lora_rank(0.5, 1.8)
         lora_rank_value_residual_mix = calc_lora_rank(0.5, 1.3) # config.lora_rank_value_residual_mix or calc_lora_rank(0.5, 1.3)
         lora_rank_gate = calc_lora_rank(0.8, 0.6) # config.lora_rank_gate or calc_lora_rank(0.8, 0.6)
+        lora_rank_deformed_key = calc_lora_rank(0.5, 1.8)
+        lora_rank_x = calc_lora_rank(0.8, 0.6)
+        lora_rank_qk = calc_lora_rank(0.8, 0.6)
 
-        self.x_r = nn.Parameter(torch.empty(1,1,C))
-        self.x_w = nn.Parameter(torch.empty(1,1,C))
-        self.x_k = nn.Parameter(torch.empty(1,1,C))
-        self.x_v = nn.Parameter(torch.empty(1,1,C))
-        self.x_a = nn.Parameter(torch.empty(1,1,C))
-        self.x_g = nn.Parameter(torch.empty(1,1,C))
+        # self.x1 = nn.Parameter(torch.empty(C, lora_rank_x))
+        # self.x2 = nn.Parameter(torch.empty(lora_rank_x, C))
+
+        # self.x_r = nn.Parameter(torch.empty(1,1,C))
+        # self.x_w = nn.Parameter(torch.empty(1,1,C))
+        # self.x_k = nn.Parameter(torch.empty(1,1,C))
+        # self.x_v = nn.Parameter(torch.empty(1,1,C))
+        # self.x_a = nn.Parameter(torch.empty(1,1,C))
+        # self.x_g = nn.Parameter(torch.empty(1,1,C))
+
+        #ratio_1_to_almost0 = 1.0 - (layer_idx / self.config.n_layer)  # 1 to ~0
+        #self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+        # ddd = torch.zeros(1, 1, C)
+        # self.time_maa_x = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_a = nn.Parameter(torch.zeros_like(ddd))
+        # self.time_maa_g = nn.Parameter(torch.zeros_like(ddd))
+
+        # self.time_maa_w2 = nn.Parameter(torch.zeros(6, lora_rank_x, C).uniform_(-0.01, 0.01))
+        # self.time_maa_w1 = nn.Parameter(torch.zeros(C, lora_rank_x*self.time_maa_w2.size(0)))
+
+        #self.q1 = nn.Parameter(torch.empty(C, lora_rank_qk))
+        #self.q2 = nn.Parameter(torch.empty(lora_rank_qk, C))
+
+        #self.k1 = nn.Parameter(torch.empty(C, lora_rank_qk))
+        #self.k2 = nn.Parameter(torch.empty(lora_rank_qk, C))
 
         self.w0 = nn.Parameter(torch.empty(1,1,C))
         self.w1 = nn.Parameter(torch.empty(C, lora_rank_decay))
@@ -590,21 +616,25 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
         self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, C))
 
-        if layer_idx > 0:
-            self.v0 = nn.Parameter(torch.empty(1,1,C))
-            self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
-            self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
+        #if layer_idx > 0:
+        self.v0 = nn.Parameter(torch.empty(1,1,C))
+        self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
 
+        #self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
         self.g2 = nn.Parameter(torch.empty(lora_rank_gate, C))
+
+        #self.kk1 = nn.Parameter(torch.empty(C, lora_rank_deformed_key))
+        #self.kk2 = nn.Parameter(torch.empty(lora_rank_deformed_key, C))
 
         self.k_k = nn.Parameter(torch.empty(1,1,C))
         self.k_a = nn.Parameter(torch.empty(1,1,C))
         self.r_k = nn.Parameter(torch.empty(H,N))
 
         # self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=attention_bias)
-        # self.key = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
-        # self.value = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=attention_bias)
+        # self.key = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.head_dim, bias=attention_bias)
+        # self.value = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.head_dim, bias=attention_bias)
         # self.output = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=attention_output_bias)
         self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
 
@@ -620,28 +650,33 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         ratio_0_to_1 = layer_id / (num_hidden_layers - 1)  # 0 to 1
         ratio_1_to_almost0 = 1.0 - (layer_id / num_hidden_layers)  # 1 to ~0
 
-        time_weight = torch.tensor(
-            [i / C for i in range(C)],
-            dtype=module.x_k.dtype,
-            device=module.x_k.device,
-        )
-        time_weight = time_weight[None, None, :]
+        # time_weight = torch.tensor(
+        #     [i / C for i in range(C)],
+        #     dtype=module.x_k.dtype,
+        #     device=module.x_k.device,
+        # )
+        # time_weight = time_weight[None, None, :]
 
         decay_speed = [
             -7.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
             for n in range(attention_hidden_size)
         ]
+
+        # def inverse_sigmoid(x): return math.log(x) - math.log(1 - x)
+        # decay_speed = [
+        #     inverse_sigmoid(0.995) + (inverse_sigmoid(0.875)-inverse_sigmoid(0.995)) * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+        #     for n in range(attention_hidden_size)
+        # ]
         decay_speed = torch.tensor(decay_speed, dtype=module.w0.dtype, device=module.w0.device)
 
         with torch.no_grad():
-            torch.nn.init.zeros_(module.x_r) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
-            torch.nn.init.zeros_(module.x_w) #.copy_( 1.0 - torch.pow(time_weight, 0.9 * ratio_1_to_almost0) )
-            torch.nn.init.zeros_(module.x_k) #.copy_( 1.0 - (torch.pow(time_weight, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1) )
-            torch.nn.init.zeros_(module.x_v) #.copy_( 1.0 - (torch.pow(time_weight, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1) )
-            torch.nn.init.zeros_(module.x_a) #.copy_( 1.0 - torch.pow(time_weight, 0.9 * ratio_1_to_almost0) )
-            torch.nn.init.zeros_(module.x_g) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
+            # torch.nn.init.zeros_(module.x_r) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
+            # torch.nn.init.zeros_(module.x_w) #.copy_( 1.0 - torch.pow(time_weight, 0.9 * ratio_1_to_almost0) )
+            # torch.nn.init.zeros_(module.x_k) #.copy_( 1.0 - (torch.pow(time_weight, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1) )
+            # torch.nn.init.zeros_(module.x_v) #.copy_( 1.0 - (torch.pow(time_weight, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1) )
+            # torch.nn.init.zeros_(module.x_a) #.copy_( 1.0 - torch.pow(time_weight, 0.9 * ratio_1_to_almost0) )
+            # torch.nn.init.zeros_(module.x_g) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
             
-        with torch.no_grad():
             ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
             ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
             ddd = torch.ones(1, 1, n_embd)
@@ -649,7 +684,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
                 ddd[0, 0, i] = i / n_embd
 
             # initialization comes from fitting my RWKV-6 7B runs
-            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, 0.6 * ratio_1_to_almost0 ** 0.9))
+            #module.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, 0.6 * ratio_1_to_almost0 ** 0.9))
 
             def ortho_init(x, scale):
                 with torch.no_grad():
@@ -705,12 +740,12 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         H = self.num_heads
         N = self.head_dim
 
-        dxprev = F.pad(x, (0, 0, 1, -1)) - x
+        # dxprev = F.pad(x, (0, 0, 1, -1)) - x
 
-        #xxx = x + dxprev * self.time_maa_x
-        #xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 6, -1).transpose(0, 1)
-        #xxx = torch.bmm(xxx, self.time_maa_w2).view(6, B, T, -1)
-        #mr, mw, mk, mv, ma, mg = xxx.unbind(dim=0)
+        # xxx = x + dxprev * self.time_maa_x
+        # xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 6, -1).transpose(0, 1)
+        # xxx = torch.bmm(xxx, self.time_maa_w2).view(6, B, T, -1)
+        # mr, mw, mk, mv, ma, mg = xxx.unbind(dim=0)
 
         # xr = x + dxprev * (self.time_maa_r + mr)
         # xw = x + dxprev * (self.time_maa_w + mw)
@@ -719,28 +754,87 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # xa = x + dxprev * (self.time_maa_a + ma)
         # xg = x + dxprev * (self.time_maa_g + mg)
 
-        xr = x+dxprev*self.x_r
-        xw = x+dxprev*self.x_w
-        xk = x+dxprev*self.x_k
-        xv = x+dxprev*self.x_v
-        xa = x+dxprev*self.x_a
-        xg = x+dxprev*self.x_g
+        # xr = x+dxprev*self.x_r
+        # xw = x+dxprev*self.x_w
+        # xk = x+dxprev*self.x_k
+        # xv = x+dxprev*self.x_v
+        # xa = x+dxprev*self.x_a
+        # xg = x+dxprev*self.x_g
+
+        #x = x + F.tanh(x @ self.x1) @ self.x2
+        xr = xw = xk = xv = xa = xg = x
 
         r = self.q_proj(xr)
-        w = torch.tanh(xw @ self.w1) @ self.w2
+        w_base = self.w0 + torch.tanh(xw @ self.w1) @ self.w2
         k = self.k_proj(xk)
         v = self.v_proj(xv)
+        # dk = self.key(torch.tanh(k))
+        # dv = self.value(torch.tanh(v))
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
         g = torch.sigmoid(xg @ self.g1) @ self.g2
+        #g = torch.sigmoid(self.gate(xg))
 
-        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w)) # FIXME - we had tried 0-softplus before
+        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w_base)) # FIXME - we had tried 0-softplus before
+        #log_neglog_w = 1 - torch.nn.functional.softplus(-(self.w0 + w_base))
+        #log_w = -log_neglog_w.exp()
+        #w = log_w.exp()
+        #w = 1.0 - 0.94 * F.sigmoid(w_base.float())
+        #log_w = w_base.log()
+
+        #r = r.sign() * r**2
+        #k = k.sign() * k**4
+        r = r.view(B,T,-1,N)
+        k = k.view(B,T,-1,N)
+        #r = r.view(B,T,-1)
+        #k = k.view(B,T,-1)
+        r = r.transpose(1,2) # BHTN
+        k = k.transpose(1,2) # B(kvh)TN
+        cos, sin = shared.angles.unbind(0)
+        r, k = apply_rotary_pos_emb(r, k, cos, sin)
+        r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
+        k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
 
+        # k = k + dk
+        # v = v + dv
+
+        #r = r + torch.tanh(r @ self.q1) @ self.q2
+        #k = k + torch.tanh(k @ self.k1) @ self.k2
+
+        #wclamp = -F.softplus(-w_base+0.54) + 1
+        #log_neglog_w = wclamp
+        #w = torch.exp(-torch.exp(wclamp))
+
+        # kk_delta = torch.tanh(xk @ self.kk1) @ self.kk2
+
+        # # TODO: consider lora replacement of xw by xk and remove one lora from ddlerp?
+        # kk = (k + kk_delta).view(B, T, H, -1)
+        # kk = kk / (kk.norm(dim=-1, keepdim=True) + 1e-7)
+        # kk = kk.view(B, T, -1)
+        # kka = kk * iclr
+        
+        # k = k * (1 - w)
+        #ka = k * iclr
+        
         kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        k = k * (1 + (a-1) * self.k_a)
+        #k = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
+        #kk = k.clone()
+        a = (1 + (a-1) * self.k_a)
+        #k = k * (N**-0.5) * a
+        k = k * a
+        #k = k * (1 + (a-1) * self.k_a)
+        ##k = k + self.k_a * a*k - self.k_a * k
+
+        if self.training:
+            log_neglog_w[reset_mask] = 1.0
+            kk[reset_mask] = 0.0
+
+        #w = (-log_neglog_w.exp()).exp()
+        #k = k * (a*w+1-w)
+
         if self.layer_idx == 0:
             v_first = v
         else:
@@ -750,10 +844,10 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         #k = k * torch.clamp(log_neglog_w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), log_neglog_w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16(), self.head_dim)
+        x = RUN_CUDA_RWKV7g(r.to(torch.bfloat16), log_neglog_w.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), -kk.to(torch.bfloat16), (kk*a).to(torch.bfloat16), self.head_dim)
 
         x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
-        x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
+        #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
 
         if input_seq_len != T:
