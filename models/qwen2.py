@@ -34,17 +34,23 @@ elif ATTENTION_TYPE == 'rwkv7':
 
     from torch.utils.cpp_extension import load
 
-    v7_kernel_version ='fla_triton'
-    if torch.version.hip and v7_kernel_version != 'fla_triton':
+    v7_kernel_version ='fla_chunk'
+    if torch.version.hip and 'fla_' not in v7_kernel_version:
         v7_kernel_version ='wind_triton_bighead'
 
-    if v7_kernel_version == 'fla_triton':
+    if v7_kernel_version == 'fla_chunk':
         from fla.ops.rwkv7.chunk import chunk_rwkv7
-        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
-            B,T,HC = r.shape
-            r,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [r,w,k,v,a,b]]
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
+            B,T,_ = r.shape
+            r,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,w,k,v,a,b]]
             return chunk_rwkv7(r, -w.exp().to(r), k, v, a, b, output_final_state=False)[0]
-    if v7_kernel_version == 'wind_triton':
+    elif v7_kernel_version == 'fla_fused_recurrent':
+        from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
+            B,T,_ = r.shape
+            r,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,w,k,v,a,b]]
+            return fused_recurrent_rwkv7(r, -w.exp().to(r), k, v, a, b, output_final_state=False)[0]
+    elif v7_kernel_version == 'wind_triton':
         from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
     elif v7_kernel_version == 'wind_triton_bighead':
         from rwkv7_attn_triton_bighead import attn_triton_bighead as RUN_CUDA_RWKV7g
@@ -91,10 +97,10 @@ elif ATTENTION_TYPE == 'rwkv7':
                 torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
                 return dw,dq,dk,dv,da,db
 
-        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
-            B,T,HC = q.shape
-            q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]
-            return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)
+        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,num_heads:int) -> torch.Tensor:
+            B,T,_ = q.shape
+            q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
+            return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,-1)
             
     elif v7_kernel_version == 'wind_backstepping':
         CHUNK_LEN = 16
@@ -131,10 +137,10 @@ elif ATTENTION_TYPE == 'rwkv7':
                 torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
                 return dw,dq,dk,dv,dz,db
 
-        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,head_dim:int) -> torch.Tensor:
+        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,num_heads:int) -> torch.Tensor:
             B,T,HC = q.shape
-            q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]
-            return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
+            q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
+            return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,-1)
     elif v7_kernel_version == 'cuda':
         DTYPE = torch.bfloat16
         XTYPE = torch.float
@@ -151,24 +157,27 @@ elif ATTENTION_TYPE == 'rwkv7':
         load(name="wkv7g", sources=["cuda/wkv7g_op.cpp", f"cuda/wkv7g_v1.cu"], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
         class WKV_7g(torch.autograd.Function):
             @staticmethod
-            def forward(ctx, r, w, k, v, a, b, head_dim:int):
+            def forward(ctx, r, w, k, v, a, b, num_heads:int):
                 with torch.no_grad():
-                    B, T, C = r.size()
-                    H = C // head_dim
-                    N = head_dim
+                    B, T, V = v.size()
+                    B, T, R = r.size()
+                    H = num_heads
+                    #N = C // H
                     A = T // CHUNK_LEN
-                    assert head_dim == C // H
+                    #assert N == C // H
                     assert T % CHUNK_LEN == 0
                     assert all(i.dtype == DTYPE for i in [r,w,k,v,a,b])
                     r,w,k,v,a,b = [i.contiguous() for i in [r,w,k,v,a,b]]
                     ctx.B = B
                     ctx.T = T
-                    ctx.C = C
+                    ctx.R = R
+                    ctx.V = V
                     ctx.H = H
-                    ctx.N = N
-                    y = torch.empty((B, T, C), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    saa = torch.empty((B, T, H, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    sss = torch.empty((B, H, A, N, N), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    ctx.NR = R // H
+                    ctx.NV = V // H
+                    y = torch.empty((B, T, V), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    saa = torch.empty((B, T, H, NR), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    sss = torch.empty((B, H, A, NR, NR), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     torch.ops.wkv7g.forward(B, T, C, H, r, w, k, v, a, b, y, saa, sss)
                     ctx.save_for_backward(r, w, k, v, a, b, saa, sss)
                     return y
@@ -177,27 +186,29 @@ elif ATTENTION_TYPE == 'rwkv7':
                 with torch.no_grad():
                     B = ctx.B
                     T = ctx.T
-                    C = ctx.C
+                    R = ctx.R
+                    V = ctx.V
                     H = ctx.H
-                    N = ctx.N
+                    NR = ctx.NR
+                    NV = ctx.NV
                     A = T // CHUNK_LEN
                     assert gy.dtype == DTYPE
                     gy = gy.contiguous()
                     r, w, k, v, a, b, saa, sss = ctx.saved_tensors
-                    gr = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
-                    gw = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
-                    gk = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
-                    gv = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
-                    ga = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    gb = torch.empty((B, T, C), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    gr = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gw = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gk = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    gv = torch.empty((B, T, V), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.zero_()#.uniform_(-100, 100)
+                    ga = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    gb = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     zzz = torch.empty((B, H, A-1, N, N), device=gy.device, dtype=XTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    torch.ops.wkv7g.backward(B, T, C, H, r, w, k, v, a, b, saa, sss, zzz, gy, gr, gw, gk, gv, ga, gb)
+                    torch.ops.wkv7g.backward(B, T, V, H, r, w, k, v, a, b, saa, sss, zzz, gy, gr, gw, gk, gv, ga, gb)
                     del saa
                     del sss
                     del zzz
                     return (gr, gw, gk, gv, ga, gb)
-        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
-            return WKV_7g.apply(r, w, k, v, a, b, head_dim)      
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
+            return WKV_7g.apply(r, w, k, v, a, b, num_heads)      
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
@@ -312,7 +323,7 @@ class TMix_qwen2(nn.Module):
         #     base=config.rope.base,
         # )
 
-    def forward(self, x, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
+    def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
         B, L, D = x.size()
         QH = self.num_heads
@@ -450,7 +461,7 @@ class TMix_qwen2rwkv6(TMix_qwen2):
         w_mask = torch.exp((w_log_cumsum - w_log_cumsum.mT).tril()).tril() # (B, H, L, L)
         return w_mask
 
-    def forward(self, x, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
+    def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
         bsz, q_len, hidden_dim = x.size()
 
@@ -556,6 +567,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
 
         C = self.hidden_size = config.n_embd
         N = self.head_dim = config.head_size
+        self.qk_head_dim = self.head_dim
         H = self.num_heads = C // N
         attention_hidden_size = H * N
         self.num_key_value_heads = config.num_key_value_heads
@@ -608,13 +620,13 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #self.k1 = nn.Parameter(torch.empty(C, lora_rank_qk))
         #self.k2 = nn.Parameter(torch.empty(lora_rank_qk, C))
 
-        self.w0 = nn.Parameter(torch.empty(1,1,C))
+        self.w0 = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
         self.w1 = nn.Parameter(torch.empty(C, lora_rank_decay))
-        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, C))
+        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, self.num_heads * self.qk_head_dim))
 
-        self.a0 = nn.Parameter(torch.empty(1,1,C))
+        self.a0 = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
-        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, C))
+        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, self.num_heads * self.qk_head_dim))
 
         #if layer_idx > 0:
         self.v0 = nn.Parameter(torch.empty(1,1,C))
@@ -628,24 +640,25 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #self.kk1 = nn.Parameter(torch.empty(C, lora_rank_deformed_key))
         #self.kk2 = nn.Parameter(torch.empty(lora_rank_deformed_key, C))
 
-        self.k_k = nn.Parameter(torch.empty(1,1,C))
-        self.k_a = nn.Parameter(torch.empty(1,1,C))
+        self.k_k = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
+        self.k_a = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
         self.r_k = nn.Parameter(torch.empty(H,N))
 
-        # self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=attention_bias)
-        # self.key = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.head_dim, bias=attention_bias)
+        #self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.qk_head_dim, bias=False)
+        #self.key = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.qk_head_dim, bias=False)
         # self.value = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.head_dim, bias=attention_bias)
         # self.output = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=attention_output_bias)
         self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
+
+    def reset_parameters(self):
+        print("Called reset_parameters on TMix_qwen2rwkv7 layer ", self.layer_idx)
+
+        module = self
 
         num_hidden_layers = n_layer = self.config.n_layer
         n_embd = self.hidden_size
         dim_att = self.num_heads * self.head_dim
         layer_id = self.layer_idx
-
-
-
-        module = self
 
         ratio_0_to_1 = layer_id / (num_hidden_layers - 1)  # 0 to 1
         ratio_1_to_almost0 = 1.0 - (layer_id / num_hidden_layers)  # 1 to ~0
@@ -658,8 +671,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
-            -7.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
-            for n in range(attention_hidden_size)
+            -7.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+            for n in range(self.num_heads * self.qk_head_dim)
         ]
 
         # def inverse_sigmoid(x): return math.log(x) - math.log(1 - x)
@@ -699,8 +712,18 @@ class TMix_qwen2rwkv7(TMix_qwen2):
                     else:
                         assert False
                     return x
-                
-            module.w0.copy_(decay_speed.reshape(1,1,C) + 0.5) # !!! 0.5 comes from F.softplus !!!
+
+            # module.x1.zero_()
+            # ortho_init(module.x2, 0.1)
+
+            # module.q1.zero_()
+            # ortho_init(module.q2, 0.1)
+            # module.k1.zero_()
+            # ortho_init(module.k2, 0.1)
+
+            module.w0.copy_(decay_speed.reshape(1,1,-1) + 0.5) # !!! 0.5 comes from F.softplus !!!
+            #module.w0.copy_(decay_speed.reshape(1,1,-1) - 1.0)
+            #module.w0.copy_(-2.0 + 1e-5 * torch.randn(1, 1, dim_att))
             module.w1.zero_()
             ortho_init(module.w2, 0.1)
 
@@ -708,24 +731,36 @@ class TMix_qwen2rwkv7(TMix_qwen2):
             module.a1.zero_()
             ortho_init(module.a2, 0.1)
 
-            if layer_idx > 0:
+            if layer_id > 0:
                 module.v0.copy_(1.0)
                 module.v1.zero_()
                 ortho_init(module.v2, 0.1)
 
+            # start gate out with no effect
+            #nn.init.zeros_(self.gate.weight)
             module.g1.zero_()
             ortho_init(module.g2, 0.1)
 
-            self.k_k.copy_(0.85) # FIXME - should this be 1.0?
-            self.k_a.copy_(1.0)
-            self.r_k.zero_()
+            #module.kk1.zero_()
+            #ortho_init(module.kk2, 0.1)
+            
+            module.k_k.copy_(0.85) # FIXME - should this be 1.0?
+            module.k_a.copy_(1.0)
+            module.r_k.zero_()
 
-            # module.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
-            # module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(attention_hidden_size**0.5))
-            # module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
+            #module.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/((self.num_heads*self.qk_head_dim)**0.5))
+            #module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/((self.num_heads*self.qk_head_dim)**0.5))
+            #module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
             # module.output.weight.data.zero_()
+            #module.key.weight.data.uniform_(-0.05/(self.num_key_value_heads**0.5), 0.05/(attention_hidden_size**0.5))
+            #module.value.weight.data.uniform_(-0.05/(self.num_key_value_heads**0.5), 0.05/(attention_hidden_size**0.5))
+            # ortho_init(module.key.weight, 0.1)
+            # ortho_init(module.value.weight, 0.1)
+            # module.key.weight.data.zero_()
+            # module.value.weight.data.zero_()
 
-    def forward(self, x, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
+
+    def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
         # bsz, q_len, hidden_dim = x.size()
         # B, L, D = x.size()
@@ -794,6 +829,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
         k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
+        #r = self.receptance(r)
+        #k = self.key(k)
+
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
@@ -828,9 +866,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #k = k * (1 + (a-1) * self.k_a)
         ##k = k + self.k_a * a*k - self.k_a * k
 
-        if self.training:
-            log_neglog_w[reset_mask] = 1.0
-            kk[reset_mask] = 0.0
+        # if self.training:
+        #     log_neglog_w[reset_mask] = 1.0
+        #     kk[reset_mask] = 0.0
 
         #w = (-log_neglog_w.exp()).exp()
         #k = k * (a*w+1-w)
@@ -844,7 +882,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         #k = k * torch.clamp(log_neglog_w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.to(torch.bfloat16), log_neglog_w.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), -kk.to(torch.bfloat16), (kk*a).to(torch.bfloat16), self.head_dim)
+        x = RUN_CUDA_RWKV7g(r.to(torch.bfloat16), log_neglog_w.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), -kk.to(torch.bfloat16), (kk*a).to(torch.bfloat16), self.num_heads)
 
         x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
         #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
@@ -907,23 +945,26 @@ class Qwen2DecoderLayer(nn.Module):
 
         self.teacher_attn = None
         if config.train is not None:
-            if config.train.attention_distillation_stage in (1, 2):
+            if config.train.attention_distillation_stage in (1, 20, 2):
                 self.teacher_attn = TMix_qwen2(args, layer_id)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
         self.mlp = cmix
 
-    def forward(self, x:Tensor, v_first:Tensor, last_model_state:ModelState, shared:Shared, output_attentions:bool, output_post_attention_hidden_states:bool):
+    def forward(self, x:Tensor, reset_mask:Tensor, v_first:Tensor, last_model_state:ModelState, shared:Shared, output_attentions:bool, output_post_attention_hidden_states:bool):
         s = last_model_state
         if self.teacher_attn is not None:
-            dx, _, last_timemix_state, attentions = self.teacher_attn(self.input_layernorm(x), v_first, s, shared, output_attentions)
-            student_dx, v_first, student_last_timemix_state, student_attentions = self.self_attn(self.input_layernorm(x), v_first, s, shared, output_attentions)
+            dx, _, last_timemix_state, attentions = self.teacher_attn(self.input_layernorm(x), reset_mask, v_first, s, shared, output_attentions)
+            student_dx, v_first, student_last_timemix_state, student_attentions = self.self_attn(self.input_layernorm(x), reset_mask, v_first, s, shared, output_attentions)
         else:
-            dx, v_first, last_timemix_state, attentions = self.self_attn(self.input_layernorm(x), v_first, s, shared, output_attentions)
+            dx, v_first, last_timemix_state, attentions = self.self_attn(self.input_layernorm(x), reset_mask, v_first, s, shared, output_attentions)
             student_dx, student_last_timemix_state, student_attentions = None, None, None
-        if output_post_attention_hidden_states:
+        if output_post_attention_hidden_states:            
             post_attention_hidden_states = dx
             student_post_attention_hidden_states = student_dx
+            # # FIXME - we change the meaning of post_attention_hidden_states to mean the difference here
+            # post_attention_hidden_states = torch.linalg.vector_norm(dx - student_dx, dim=-1).mean() * (dx[0].size(-1) ** -0.5)
+            # student_post_attention_hidden_states = torch.empty(0, device=x.device)
         else:
             post_attention_hidden_states = torch.empty(0, device=x.device)
             student_post_attention_hidden_states = torch.empty(0, device=x.device)
@@ -934,7 +975,7 @@ class Qwen2DecoderLayer(nn.Module):
         return x, v_first, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states
 
 def ckpt(block:Qwen2DecoderLayer, *block_args):
-    if block.training and block.config.train.grad_cp == 1 and 'fsdp' not in block.config.train.strategy: # FSDP has its own checkpointing wrapper
+    if block.training and block.config.train.grad_cp == 1: # and 'fsdp' not in block.config.train.strategy: # FSDP has its own checkpointing wrapper
         #if "deepspeed" in block.config.train.strategy:
         #    results = deepspeed.checkpointing.checkpoint(block, *block_args)
         #else:
@@ -967,7 +1008,9 @@ class Qwen2Decoder(nn.Module):
 
         shared = self.shared
         if config.rope is not None and shared.angles.size(0) == 0:
-            shared.angles = generate_rotary_embedding(config.ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
+            # FIXME - forcing at least 1024ctxlen RoPE for mmlu
+            max_ctx_len = max(1024, config.ctx_len)
+            shared.angles = generate_rotary_embedding(max_ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
 
         assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
 
@@ -993,6 +1036,9 @@ class Qwen2Decoder(nn.Module):
             T = len(token_ids)
             token_ids = torch.tensor(token_ids, device=self.embed_tokens.weight.device, dtype=torch.long, requires_grad=False)[None, :]
 
+        eos_token_id = 151643 # "<|endoftext|>"
+        reset_mask = F.pad(token_ids == eos_token_id, (1, -1), value=False)
+
         x = self.embed_tokens(token_ids)
 
         v_first = torch.tensor([], device=x.device)
@@ -1004,7 +1050,7 @@ class Qwen2Decoder(nn.Module):
             hidden_states_outputs += (x,)
             student_hidden_states_outputs += (x,)
         for decoder_layer in self.layers:
-            x, v_first, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states = ckpt(decoder_layer, x, v_first, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
+            x, v_first, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states = ckpt(decoder_layer, x, reset_mask, v_first, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
             hidden_states_outputs += (x,)
             student_hidden_states_outputs += (x,)
             if output_attentions:
@@ -1033,7 +1079,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.model = None
 
-        #self.configure_model()
+        self.configure_model()
 
     def configure_model(self):
         if self.model is not None: 
@@ -1054,7 +1100,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         train_config = self.config.train
 
-        if train_config.attention_distillation_stage in (1, 2):
+        if train_config.attention_distillation_stage in (1, 20, 2):
             self.requires_grad_(False)
             for decoder_layer in self.model.layers:
                 if train_config.attention_distillation_stage == 1:
@@ -1070,8 +1116,25 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     # FIXME - wow we removed q, k here by accident and it.. helped??!?!
                     # decoder_layer.self_attn.q_proj.requires_grad_(True)
                     # decoder_layer.self_attn.k_proj.requires_grad_(True)
+                elif train_config.attention_distillation_stage == 20:
+                    decoder_layer.self_attn.requires_grad_(True)
+                    #decoder_layer.self_attn.q_proj.requires_grad_(False)
+                    #decoder_layer.self_attn.k_proj.requires_grad_(False)
+                    decoder_layer.self_attn.v_proj.requires_grad_(False)
+                    decoder_layer.self_attn.o_proj.requires_grad_(False)
                 elif train_config.attention_distillation_stage == 2:
                     decoder_layer.self_attn.requires_grad_(True)
+                    # decoder_layer.self_attn.k_proj.requires_grad_(False)
+                    # decoder_layer.self_attn.v_proj.requires_grad_(False)
+        # elif train_config.attention_distillation_stage == 3:
+        #     self.requires_grad_(False)
+        #     # self.model.embed_tokens.requires_grad_(False)
+        #     # self.model.norm.requires_grad_(False)
+        #     # self.lm_head.requires_grad_(False)
+        #     for decoder_layer in self.model.layers:
+        #         decoder_layer.self_attn.requires_grad_(True)
+        #         # decoder_layer.self_attn.k_proj.requires_grad_(False)
+        #         # decoder_layer.self_attn.v_proj.requires_grad_(False)
 
         # FIXME - remove these for full training
         # for decoder_layer in self.model.layers:
@@ -1108,9 +1171,9 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         lr_1x = sorted(list(lr_1x))
         lr_fp32 = sorted(list(lr_fp32))
         
-        print('decay', lr_decay, '\n')
-        print('1x', lr_1x, '\n')
-        print('fp32', lr_fp32, '\n')
+        # print('decay', lr_decay, '\n')
+        # print('1x', lr_1x, '\n')
+        # print('fp32', lr_fp32, '\n')
 
         
         optim_groups = [

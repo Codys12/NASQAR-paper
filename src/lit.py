@@ -23,6 +23,8 @@ from .state import ModelState
 
 import src.metrics as metrics
 
+from contextlib import nullcontext
+
 from src.logger import print0 as print
 
 if importlib.util.find_spec('deepspeed'):
@@ -50,7 +52,7 @@ class L2Wrap(torch.autograd.Function):
         return (grad_output, gy)
 
 class LightningModelWrapper(pl.LightningModule):
-    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None=None):
+    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None, trainer):
         super().__init__()
         self.model = model
         self.config = config
@@ -58,25 +60,37 @@ class LightningModelWrapper(pl.LightningModule):
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
         self.configured = False
 
+        self.trainer = trainer
+        #self.configure_model()
+
     def configure_model(self):
         if self.configured:
             return
         self.configured = True
 
+        print("Running configure_model")
+
         if hasattr(self.model, 'configure_model'):
+            #with self.trainer.init_module(empty_init=True) if 'fsdp' in self.config.train.strategy and self.trainer.local_rank != 0 else nullcontext():
             self.model.configure_model()
 
         if self.config.train is not None:
             if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage != 3):
-                self.init_all_weights()
+                print("Resetting parameters")
+                #self.init_all_weights()
+                for submodule in self.model.modules():
+                    if hasattr(submodule, 'reset_parameters'):
+                        submodule.reset_parameters()
 
         if 'deepspeed_stage_3' not in self.config.train.strategy:
             self.load_weights()
 
-    def init_all_weights(self):
-        print("Initializing weights...")
-        if hasattr(self.model, 'init_all_weights'):
-            self.model.init_all_weights()
+    # def init_all_weights(self):
+    #     print("Initializing weights...")
+    #     # if hasattr(self.model, 'init_all_weights'):
+    #     #     self.model.init_all_weights()
+    #     if hasattr(self.model, 'reset_parameters'):
+    #         self.model.reset_parameters()
 
     def configure_gradient_clipping(
             self,
@@ -302,6 +316,14 @@ class LightningModelWrapper(pl.LightningModule):
         print("Configuring optimizers!!!")
 
         betas = (train_config.beta1, train_config.beta2)
+        if train_config.optimizer == 'adamwschedulefree':
+            import schedulefree
+            self.optimizer = schedulefree.AdamWScheduleFree(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps)
+            return self.optimizer
+        if train_config.optimizer == 'radamschedulefree':
+            import schedulefree
+            self.optimizer = schedulefree.RAdamScheduleFree(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps)
+            return self.optimizer
         if train_config.optimizer == 'adam8bit':
             import bitsandbytes as bnb
             return bnb.optim.Adam(optim_groups, train_config.lr_init, betas, optim_bits=8, percentile_clipping=5)
@@ -314,6 +336,39 @@ class LightningModelWrapper(pl.LightningModule):
         if self.deepspeed_offload:
             return DeepSpeedCPUAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
         return FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
+
+    def on_fit_start(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.optimizer.train()
+
+    def on_predict_start(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.optimizer.eval()
+
+    def on_validation_model_eval(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.model.eval()
+            self.optimizer.eval()
+
+    def on_validation_model_train(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.model.train()
+            self.optimizer.train()
+
+    def on_test_model_eval(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.model.eval()
+            self.optimizer.eval()
+
+    def on_test_model_train(self) -> None:
+        if 'schedulefree' in self.config.train.optimizer:
+            self.model.train()
+            self.optimizer.train()
+
+    def on_predict_model_eval(self) -> None:  # redundant with on_predict_start()
+        if 'schedulefree' in self.config.train.optimizer:
+            self.model.eval()
+            self.optimizer.eval()
 
     @property
     def deepspeed_offload(self) -> bool:
@@ -331,10 +386,10 @@ class LightningModelWrapper(pl.LightningModule):
         causal_mask = torch.full((T, T), fill_value=-torch.inf, dtype=torch.bfloat16, device=x.device).triu(1)
         causal_mask = causal_mask[None, None, :, :].expand(B, 1, -1, -1)
 
-        if self.training and self.config.train.attention_distillation_stage in (1, 2):
+        if self.training and self.config.train.attention_distillation_stage in (1, 20, 2):
             stage = self.config.train.attention_distillation_stage
             output_attentions = stage == 1
-            output_post_attention_hidden_states = stage == 2
+            output_post_attention_hidden_states = stage in (20, 2)
             # special code for attention output and/or attention matrix loss
             if self.config.model.hf_path != '':
                 results = self.model.forward(x, output_hidden_states=False, output_attentions=True)
@@ -348,8 +403,9 @@ class LightningModelWrapper(pl.LightningModule):
             if self.config.model.hf_path == '':
                 if stage == 1:
                     reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0)).mean() / results.attentions[0].size(-1)
-                else: # stage == 2:
+                else: # stage in (20, 2):
                     reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    #reported_loss = training_loss = torch.stack(results.post_attention_hidden_states, dim=0).mean()
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
@@ -375,7 +431,7 @@ class LightningModelWrapper(pl.LightningModule):
         flat_student_logits = logits.view(-1, logits.size(-1))
         flat_labels = y.view(-1)
 
-        chunk_loss_calcs = self.config.train.attention_distillation_stage == 0
+        chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
         if not chunk_loss_calcs:
             reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
         else:
@@ -486,6 +542,8 @@ class LightningModelWrapper(pl.LightningModule):
                     #print(str)
                     if len(self.config.train.wandb) > 0:
                         self.trainer.my_wandb.log(logdict, step=self.get_real_global_step(), commit=True)
+
+        print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
 
         #if logits.size(0) > 0:
         #    return L2Wrap.apply(training_loss, logits)

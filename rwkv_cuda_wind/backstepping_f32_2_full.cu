@@ -29,11 +29,12 @@ TORCH_LIBRARY_IMPL(wind_backstepping, CUDA, m) {
     m.impl("backward", &backward);
 }
 
-__device__ inline bf to_bf(const float & u) {
-float2 f2 = {u, 0.0f};
-__hip_bfloat162 bf2 = __float22bfloat162_rn(f2);
-return bf2.x;
-}
+__device__ inline bf to_bf(const float & u) { return 	__float2bfloat16_rn(u); }
+// __device__ inline bf to_bf(const float & u) {
+// float2 f2 = {u, 0.0f};
+// __hip_bfloat162 bf2 = __float22bfloat162_rn(f2);
+// return bf2.x;
+// }
 __device__ inline float to_float(const bf & u) { return __bfloat162float(u); }
 
 #include <assert.h>

@@ -6,6 +6,9 @@ from typing import Callable
 
 logging.basicConfig(level=logging.INFO)
 
+from src.logger import print0 as print
+from accelerate import init_empty_weights as init_on_meta_device
+
 if __name__ == "__main__":
     from argparse import ArgumentParser
     from lightning import Trainer
@@ -14,6 +17,8 @@ if __name__ == "__main__":
     from lightning.pytorch.strategies.fsdp import FSDPStrategy
 
     from transformers import AutoModelForCausalLM
+
+    from contextlib import nullcontext, contextmanager
 
     rank_zero_info("########## work in progress ##########")
 
@@ -144,9 +149,11 @@ if __name__ == "__main__":
     if str(config.train.precision) == "32":
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.matmul.allow_tf32 = False
+        torch.set_float32_matmul_precision('highest')
     else:
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
 
     pl.seed_everything(config.train.seed_everything)
 
@@ -168,9 +175,36 @@ if __name__ == "__main__":
     if 'fsdp' in config.train.strategy:
         from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
         auto_wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=int(1e6))
-        activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
+        #auto_wrap_policy = {models.qwen2.Qwen2DecoderLayer}
+        activation_checkpointing_policy = None #{ models.qwen2.Qwen2DecoderLayer }
 
-        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
+        from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload, MixedPrecision, ShardingStrategy
+        mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        def init_fn(x: torch.nn.Module):
+            return x.to_empty(device=torch.get_default_device(), recurse=False)
+
+        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True, mixed_precision=mixed_precision, limit_all_gathers=True, use_orig_params=True, param_init_fn=init_fn)
+
+
+    # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
+    trainer = Trainer(
+                        use_distributed_sampler=False, 
+                        enable_checkpointing=False,
+                        num_sanity_val_steps=0,
+                        logger=False,
+                        max_epochs=-1,
+
+                        accelerator=config.train.accelerator, 
+                        strategy=strategy_obj, 
+                        devices=config.train.devices, 
+                        num_nodes=config.train.num_nodes, 
+                        precision=config.train.precision,
+                        callbacks=[train_callback(config)], 
+                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
+                        log_every_n_steps=config.train.log_every_n_steps, 
+                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
+                        gradient_clip_val=config.train.gradient_clip_val, 
+                        val_check_interval=config.train.val_check_interval)
 
     qwen_cfg = {
         "attention_dropout": 0.0,
@@ -197,10 +231,40 @@ if __name__ == "__main__":
         "vocab_size": 151936,
     }
 
+    @contextmanager
+    def dualcontextmanager(a, b):
+        with a(), b():
+            yield
+
+    @contextmanager
+    def default_dtype_manager(dtype: torch.dtype):
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(dtype)
+        yield
+        torch.set_default_dtype(old_dtype)
+
+    ctx = nullcontext
+    if 'fsdp' in config.train.strategy:
+        # if trainer.local_rank == 0:
+        #     print('ctx rank0')
+        #     ctx = partial(trainer.init_module, empty_init=True)
+        #     #from lightning.fabric.utilities.init import _EmptyInit
+        #     #ctx = _EmptyInit
+        # else:
+        #     print('ctx rank other meta')
+        #     ctx = init_on_meta_device
+        #     #ctx = partial(torch.device, "meta")
+        #     #ctx = partial(dualcontextmanager, init_on_meta_device, partial(default_dtype_manager, torch.bfloat16))# trainer.strategy.precision_plugin.tensor_init_context)
+
+        ctx = init_on_meta_device
+
     teacher = None
+    teacher_factory = None
+    teacher_config = None
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
+            print("Instantiating teacher model")
             hf_path = teacher_config.model.hf_path
             classname = teacher_config.model.classname
             if hf_path != '':
@@ -211,7 +275,8 @@ if __name__ == "__main__":
                 if teacher_factory is None:
                     print(f"Unsupported teacher model type: {teacher_classpath}")
                     exit(0)
-                teacher = teacher_factory(teacher_config)
+                with ctx():
+                    teacher = teacher_factory(teacher_config)
             elif teacher_config.model.tmix.startswith('qwen2'):
                 from qwen2.modeling_qwen2 import Qwen2ForCausalLM
                 teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
@@ -219,6 +284,7 @@ if __name__ == "__main__":
                 teacher = Transformer(teacher_config)
 
             if hasattr(teacher, 'configure_model'):
+                print("configuring TEACHER")
                 teacher.configure_model()
 
             teacher.eval()
@@ -226,6 +292,7 @@ if __name__ == "__main__":
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
     if True:
+        print("Instantiating student model")
         attention_distillation_stage = config.train.attention_distillation_stage
         hf_path = config.model.hf_path
         classname = config.model.classname
@@ -241,7 +308,8 @@ if __name__ == "__main__":
             if model_factory is None:
                 print(f"Unsupported model type: {model_classpath}")
                 exit(0)
-            model = model_factory(config)
+            with ctx():
+                model = model_factory(config)
         elif config.model.tmix.startswith('qwen2'):
             from qwen2.modeling_qwen2 import Qwen2ForCausalLM
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
@@ -273,6 +341,7 @@ if __name__ == "__main__":
         pass
     elif config.model.tmix.startswith('qwen2'):
         if config.train.grad_cp:
+            print("Setting grad cp")
             if "deepspeed" in config.train.strategy:
                 model._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
                 model.gradient_checkpointing = True
@@ -280,6 +349,7 @@ if __name__ == "__main__":
                 model.gradient_checkpointing_enable()
 
         if os.getenv("RWKV_TORCH_COMPILE", '0').lower() in ['1', 'true']:
+            print("Compiling model")
             model = torch.compile(model)
             if teacher is not None:
                 teacher = torch.compile(teacher)
@@ -288,28 +358,16 @@ if __name__ == "__main__":
         #    if teacher is not None:
         #        teacher = torch.jit.script(teacher)
 
-    #with trainer.init_module(empty_init=not config.train.load_partial):
-    wrapper = LightningModelWrapper(model, config, teacher) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
-       
-    # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
-    trainer = Trainer(
-                        use_distributed_sampler=False, 
-                        enable_checkpointing=False,
-                        num_sanity_val_steps=0,
-                        logger=False,
-                        max_epochs=-1,
+    print("Instantiating wrapper model")
 
-                        accelerator=config.train.accelerator, 
-                        strategy=strategy_obj, 
-                        devices=config.train.devices, 
-                        num_nodes=config.train.num_nodes, 
-                        precision=config.train.precision,
-                        callbacks=[train_callback(config)], 
-                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
-                        log_every_n_steps=config.train.log_every_n_steps, 
-                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
-                        gradient_clip_val=config.train.gradient_clip_val, 
-                        val_check_interval=config.train.val_check_interval)
+    #with trainer.init_module(empty_init=not config.train.load_partial):
+    wrapper = LightningModelWrapper(model, config, teacher, trainer) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
+
+    if 'fsdp' in config.train.strategy:
+        if trainer.local_rank == 0:
+            wrapper.to_empty(device=torch.device('cpu'), recurse=True)
+
+    print("Creating DataLoader")
 
     if "deepspeed" in config.train.strategy:
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
@@ -329,5 +387,6 @@ if __name__ == "__main__":
     ds_ckpt_path = None
     #if 'deepspeed_stage_3' in config.train.strategy and config.continued:
     #    ds_ckpt_path = config.train.load_model
+    print("Trainer.fit")
     trainer.fit(wrapper, train_dataloaders=train_data_loader, val_dataloaders=validation_data_loader, ckpt_path=ds_ckpt_path)
 

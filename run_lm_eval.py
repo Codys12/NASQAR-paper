@@ -8,7 +8,8 @@ import os, sys, types, json, math, time
 import numpy as np
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
 
-import transformers # just for a bugfix for 0.4.2 of lm_eval
+#import transformers # just for a bugfix for 0.4.2 of lm_eval
+from transformers import AutoModelForCausalLM
 
 import torch
 torch.backends.cudnn.benchmark = True
@@ -92,7 +93,7 @@ with torch.device('meta'):
 
 if hasattr(model, 'configure_model'):
     model.configure_model()
-model.load_state_dict(load_dict, assign=True)
+model.load_state_dict(load_dict, assign=True, strict=False)
 
 match config.precision:
     case 32:
@@ -145,7 +146,7 @@ class TokenizerWrapper:
 
 class EvalHarnessAdapter(TemplateLM):
     # bugfix for lm_eval 0.4.2
-    AUTO_MODEL_CLASS = transformers.AutoModelForCausalLM
+    AUTO_MODEL_CLASS = AutoModelForCausalLM
 
     def __init__(self, batch_size_per_gpu, tokenizer):
         super().__init__()
@@ -334,7 +335,7 @@ if config.seed is None:
 
 # tokenizer = TokenizerWrapper(pipeline.tokenizer) # RWKV tokenizer
 from transformers import AutoTokenizer
-tokenizer:transformers.PreTrainedTokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2-0.5B')
+tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2-0.5B')
 RWKV_PAD = []
 
 adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, tokenizer=tokenizer)
