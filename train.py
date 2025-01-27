@@ -179,7 +179,9 @@ if __name__ == "__main__":
         activation_checkpointing_policy = None #{ models.qwen2.Qwen2DecoderLayer }
 
         from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload, MixedPrecision, ShardingStrategy
-        mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        mixed_precision = None
+        #mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        #mixed_precision = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
         def init_fn(x: torch.nn.Module):
             return x.to_empty(device=torch.get_default_device(), recurse=False)
 
