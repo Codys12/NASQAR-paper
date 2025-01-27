@@ -23,38 +23,49 @@ if importlib.util.find_spec('deepspeed'):
 from src.logger import print0 as print
 
 ATTENTION_TYPE = os.environ["RWKV_ATTENTION_TYPE"]
-assert ATTENTION_TYPE in ['rwkv6', 'rwkv7']
 if ATTENTION_TYPE == 'rwkv6':
     from fla.ops.gla.chunk import chunk_gla
     from fla.ops.gla.fused_recurrent import fused_recurrent_gla
 
-elif ATTENTION_TYPE == 'rwkv7':
+elif 'rwkv7' in ATTENTION_TYPE:
     HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE_A"])
     CTX_LEN = int(os.environ["RWKV_CTXLEN"])
 
     from torch.utils.cpp_extension import load
 
-    v7_kernel_version ='fla_chunk'
-    if torch.version.hip and 'fla_' not in v7_kernel_version:
-        v7_kernel_version ='wind_triton_bighead'
+    if ATTENTION_TYPE == 'rwkv7':
+        ATTENTION_TYPE = 'rwkv7_wind_triton_bighead'
+    if torch.version.hip and 'fla_' not in ATTENTION_TYPE:
+        ATTENTION_TYPE ='rwkv7_wind_triton_bighead'
 
-    if v7_kernel_version == 'fla_chunk':
+    if ATTENTION_TYPE == 'rwkv7_fla_chunk':
         from fla.ops.rwkv7.chunk import chunk_rwkv7
-        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
             B,T,_ = r.shape
-            r,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,w,k,v,a,b]]
-            return chunk_rwkv7(r, -w.exp().to(r), k, v, a, b, output_final_state=False)[0]
-    elif v7_kernel_version == 'fla_fused_recurrent':
+            dtype = r.dtype
+            r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
+            log_w = -log_neglog_w.float().exp()
+            log_w = log_w.to(r)
+            return chunk_rwkv7(r=r, log_w=log_w, k=k, v=v, a=a, b=b, output_final_state=False)[0].to(dtype)
+    elif ATTENTION_TYPE == 'rwkv7_fla_fused_recurrent':
         from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
-        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
             B,T,_ = r.shape
-            r,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,w,k,v,a,b]]
-            return fused_recurrent_rwkv7(r, -w.exp().to(r), k, v, a, b, output_final_state=False)[0]
-    elif v7_kernel_version == 'wind_triton':
-        from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
-    elif v7_kernel_version == 'wind_triton_bighead':
-        from rwkv7_attn_triton_bighead import attn_triton_bighead as RUN_CUDA_RWKV7g
-    elif v7_kernel_version in ('wind_cuda', 'wind_cuda_full'):
+            r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
+            log_w = -log_neglog_w.float().exp()
+            log_w = log_w.to(r)
+            return fused_recurrent_rwkv7(r, log_w, k, v, a, b, output_final_state=False)[0]
+    elif ATTENTION_TYPE == 'rwkv7_wind_triton':
+        from rwkv7_attn_triton import attn_triton
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
+            B,T,C = r.shape
+            return attn_triton(r, log_neglog_w, k, v, a, b, C // num_heads)
+    elif ATTENTION_TYPE == 'rwkv7_wind_triton_bighead':
+        from rwkv7_attn_triton_bighead import attn_triton_bighead
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
+            B,T,C = r.shape
+            return attn_triton_bighead(r, log_neglog_w, k, v, a, b, C // num_heads)
+    elif ATTENTION_TYPE in ('rwkv7_wind_cuda', 'rwkv7_wind_cuda_full'):
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', "-O3"]
@@ -64,7 +75,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             else:
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
-        if v7_kernel_version == 'wind_cuda_full':
+        if ATTENTION_TYPE == 'rwkv7_wind_cuda_full':
             sources=['rwkv_cuda_wind/wind_rwkv7_full.cu']
         else:
             sources=['rwkv_cuda_wind/wind_rwkv7.cpp', 'rwkv_cuda_wind/wind_rwkv7.cu']
@@ -102,7 +113,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,-1)
             
-    elif v7_kernel_version == 'wind_backstepping':
+    elif ATTENTION_TYPE == 'rwkv7_wind_backstepping':
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
@@ -113,7 +124,16 @@ elif ATTENTION_TYPE == 'rwkv7':
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
         VERSION = 1 if HEAD_SIZE < 128 else 2
-        load(name="wind_backstepping", sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+
+
+        if ATTENTION_TYPE == 'rwkv7_wind_backstepping_full':
+            sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu']
+        else:
+            sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}.cu', f'rwkv_cuda_wind/backstepping_f32_cpp.cu']
+
+        #load(name="wind_backstepping", sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        load(name="wind_backstepping", sources=sources, is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+
 
         class WindBackstepping(torch.autograd.Function):
             @staticmethod
@@ -141,7 +161,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             B,T,HC = q.shape
             q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
             return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,-1)
-    elif v7_kernel_version == 'cuda':
+    elif ATTENTION_TYPE == 'rwkv7_cuda':
         DTYPE = torch.bfloat16
         XTYPE = torch.float
         T = CTX_LEN
@@ -208,7 +228,9 @@ elif ATTENTION_TYPE == 'rwkv7':
                     del zzz
                     return (gr, gw, gk, gv, ga, gb)
         def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            return WKV_7g.apply(r, w, k, v, a, b, num_heads)      
+            return WKV_7g.apply(r, w, k, v, a, b, num_heads)  
+    else:
+        assert ATTENTION_TYPE != ATTENTION_TYPE, 'bad attention type specified'
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
@@ -809,8 +831,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         g = torch.sigmoid(xg @ self.g1) @ self.g2
         #g = torch.sigmoid(self.gate(xg))
 
-        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w_base)) # FIXME - we had tried 0-softplus before
-        #log_neglog_w = 1 - torch.nn.functional.softplus(-(self.w0 + w_base))
+        # FIXME - adding w0 twice here!!! its also added above
+        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w_base).float()) # FIXME - we had tried 0-softplus before
+        #log_neglog_w = 1 - torch.nn.functional.softplus(-w)
         #log_w = -log_neglog_w.exp()
         #w = log_w.exp()
         #w = 1.0 - 0.94 * F.sigmoid(w_base.float())
@@ -935,9 +958,9 @@ class Qwen2DecoderLayer(nn.Module):
 
         cmix = CMix_qwen2(args, layer_id)
 
-        if args.attention_type == 'rwkv6':
+        if 'rwkv6' in args.attention_type:
             self.self_attn = TMix_qwen2rwkv6(args, layer_id)
-        elif args.attention_type == 'rwkv7':
+        elif 'rwkv7' in args.attention_type:
             self.self_attn = TMix_qwen2rwkv7(args, layer_id)
         else:
             self.self_attn = TMix_qwen2(args, layer_id)
@@ -1050,7 +1073,7 @@ class Qwen2Decoder(nn.Module):
             hidden_states_outputs += (x,)
             student_hidden_states_outputs += (x,)
         for decoder_layer in self.layers:
-            x, v_first, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states = ckpt(decoder_layer, x, reset_mask, v_first, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
+            x, v_first, last_model_state, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states = ckpt(decoder_layer, x, reset_mask, v_first, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
             hidden_states_outputs += (x,)
             student_hidden_states_outputs += (x,)
             if output_attentions:
