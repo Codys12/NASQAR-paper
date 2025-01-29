@@ -34,11 +34,9 @@ where the data is repeated 3 times (each time with different shuffle)
 #from tokenizer.rwkv_tokenizer import TRIE_TOKENIZER
 #tokenizer = TRIE_TOKENIZER("tokenizer/rwkv_vocab_v20230424.txt")
 
-from datasets import load_dataset
+import argparse
 
-import transformers
-from transformers import Qwen2Tokenizer, Qwen2TokenizerFast
-tokenizer:transformers.PreTrainedTokenizer = Qwen2TokenizerFast.from_pretrained('Qwen/Qwen-tokenizer')
+from datasets import load_dataset
 
 from src.binidx import MMapIndexedDataset
 def index_file_path(prefix_path):
@@ -93,21 +91,37 @@ def is_prime(n):
 
 ########################################################################################################
 
-if len(sys.argv) not in [4, 5, 6] or sys.argv[1].strip() not in ['check', 'build', 'fixeos']:
-    print('Usage: python make_data_hf.py check|build|fixeos HF_DATASET_NAME CTX_LEN [COLUMN_NAME] [MAX_TOKENS]')
-    exit()
+parser = argparse.ArgumentParser(description="Converts HF dataset to binidx format") 
+parser.add_argument('--action', type=str, choices=['check','build','fixeos'], required=True)
+parser.add_argument('--dataset', type=str, help='Hugging Face dataset path', required=True) 
+parser.add_argument('--tokenizer', type=str, help='Hugging Face tokenizer path', default='Qwen/Qwen-tokenizer', required=False) 
+parser.add_argument('--ctxlen', type=int, help='Context length', required=True) 
+parser.add_argument('--column_name', type=str, help='Column name', default='text', required=False) 
+parser.add_argument('--max_tokens', type=int, help='Maximum tokens to convert', default=1_000_000_000_000_000, required=False) 
+#parser.add_argument('--dtype', type=str, help='dtype of token', choices=['int32', 'uint16'], default='int32', required=False) 
+args = parser.parse_args()
 
-command = sys.argv[1].strip()
-DATASET_NAME = sys.argv[2].strip()
+
+#if len(sys.argv) not in [4, 5, 6] or sys.argv[1].strip() not in ['check', 'build', 'fixeos']:
+#    print('Usage: python make_data_hf.py check|build|fixeos HF_DATASET_NAME CTX_LEN [COLUMN_NAME] [MAX_TOKENS]')
+#    exit()
+
+command = args.action #sys.argv[1].strip()
+DATASET_NAME = args.dataset #sys.argv[2].strip()
 OUT_NAME = os.path.splitext(os.path.basename(DATASET_NAME))[0]
-CTX_LEN = int(sys.argv[3].strip())
-COLUMN_NAME = 'text'
-if len(sys.argv) >= 5:
-    COLUMN_NAME = sys.argv[4].strip()
+CTX_LEN = args.ctxlen #int(sys.argv[3].strip())
+COLUMN_NAME = args.column_name #'text'
+#if len(sys.argv) >= 5:
+#    COLUMN_NAME = sys.argv[4].strip()
 
-MAX_TOKENS = 1_000_000_000_000_000
-if len(sys.argv) >= 6:
-    MAX_TOKENS = int(sys.argv[5].strip())
+MAX_TOKENS = args.max_tokens #1_000_000_000_000_000
+#if len(sys.argv) >= 6:
+#    MAX_TOKENS = int(sys.argv[5].strip())
+
+from transformers import AutoTokenizer, PreTrainedTokenizer
+#tokenizer:PreTrainedTokenizer = Qwen2TokenizerFast.from_pretrained('Qwen/Qwen-tokenizer')
+tokenizer:PreTrainedTokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+token_dtype = np.int32 if tokenizer.vocab_size > 65536 else np.uint16
 
 if command == 'build':
 
@@ -119,7 +133,7 @@ if command == 'build':
 
     print("### Building binidx...")
 
-    builder = MMapIndexedDatasetBuilder(f"{OUT_NAME}.bin", dtype=np.int32)
+    builder = MMapIndexedDatasetBuilder(f"{OUT_NAME}.bin", dtype=token_dtype)
 
     def process(example):
         global builder, COLUMN_NAME
@@ -129,7 +143,7 @@ if command == 'build':
         lens = []
         for encoded in tokenizer(example[COLUMN_NAME], add_special_tokens=False)['input_ids']:
             encoded.append(tokenizer.eos_token_id) # add the end of text token, e.g. 50256 for gpt2 bpe
-            encoded = np.asarray(encoded, dtype=np.int32)
+            encoded = np.asarray(encoded, dtype=token_dtype)
             encodeds.append(encoded)
             lens.append(len(encoded))
             #print(len(encoded))
@@ -161,7 +175,7 @@ if command == 'build':
 if command == 'fixeos':
     data = MMapIndexedDataset(OUT_NAME)
     data_len = len(data)
-    bin_buffer_mmap = np.memmap(OUT_NAME + '.bin', dtype=np.int32, mode="r+", order="C")
+    bin_buffer_mmap = np.memmap(OUT_NAME + '.bin', dtype=token_dtype, mode="r+", order="C")
     for idx in range(data_len):
         ptr, size = data._index[idx]
         if bin_buffer_mmap[ptr//4 + size - 1] != 0:
