@@ -1,3 +1,7 @@
+model:
+  attention_type: rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # 
+  ctx_len: 512
+
 train:
   wandb: qwen2rwkv
   
@@ -10,6 +14,7 @@ train:
   my_exit_tokens: 500000000 #1491785955
   magic_prime: 2929793 # 2913641 # 364193
 
+  optimizer: dsfusedadamw
   #optimizer: adamwschedulefree
   lr_wait: 0.8
   lr_decay_type: linear

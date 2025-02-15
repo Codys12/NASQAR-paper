@@ -25,12 +25,9 @@ import src.metrics as metrics
 
 from contextlib import nullcontext
 
-from src.logger import print0 as print
+from accelerate import init_empty_weights as init_on_meta_device
 
-if importlib.util.find_spec('deepspeed'):
-    import deepspeed
-    from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
-    from deepspeed.utils import safe_set_full_fp32_param, safe_set_local_fp32_param, safe_set_full_optimizer_state
+from src.logger import print0 as print
 
 def console_clear_last_line():
     print('\033[1A', end='\x1b[2K')
@@ -61,7 +58,6 @@ class LightningModelWrapper(pl.LightningModule):
         self.configured = False
 
         self.trainer = trainer
-        #self.configure_model()
 
     def configure_model(self):
         if self.configured:
@@ -70,27 +66,86 @@ class LightningModelWrapper(pl.LightningModule):
 
         print("Running configure_model")
 
-        if hasattr(self.model, 'configure_model'):
-            #with self.trainer.init_module(empty_init=True) if 'fsdp' in self.config.train.strategy and self.trainer.local_rank != 0 else nullcontext():
-            self.model.configure_model()
+        print("configuring student")
+        self.configure_specific_model(self.model, maybe_do_reset=True)
 
-        if self.config.train is not None:
-            if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage != 3):
-                print("Resetting parameters")
-                #self.init_all_weights()
-                for submodule in self.model.modules():
-                    if hasattr(submodule, 'reset_parameters'):
-                        submodule.reset_parameters()
+        if self.teacher is not None:
+            print("configuring teacher")
+            self.configure_specific_model(self.teacher, maybe_do_reset=False)
+            self.teacher.eval()
+            self.teacher.requires_grad_(False)            
 
-        if 'deepspeed_stage_3' not in self.config.train.strategy:
-            self.load_weights()
+        # FIXME - not sure how the resetted and/or loaded weights are getting transferred to the other GPUs on DS1, but it seems to be working??!
+        if self.trainer.local_rank == 0:
+            if 'deepspeed_stage_3' not in self.config.train.strategy:
+                self.load_weights()
 
-    # def init_all_weights(self):
-    #     print("Initializing weights...")
-    #     # if hasattr(self.model, 'init_all_weights'):
-    #     #     self.model.init_all_weights()
-    #     if hasattr(self.model, 'reset_parameters'):
-    #         self.model.reset_parameters()
+        # if self.config.train.strategy == 'fsdp':
+        #     from functools import partial
+        #     from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+        #     auto_wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=int(1e6))
+        #     #auto_wrap_policy = {models.qwen2.Qwen2DecoderLayer}
+        #     activation_checkpointing_policy = None #{ models.qwen2.Qwen2DecoderLayer }
+
+        #     #from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload, MixedPrecision, ShardingStrategy
+        #     mixed_precision = None
+        #     #mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        #     #mixed_precision = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        #     def init_fn(x: torch.nn.Module):
+        #         return x.to_empty(device=torch.get_default_device(), recurse=False)
+
+        #     #strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True, mixed_precision=mixed_precision, limit_all_gathers=True, use_orig_params=True, param_init_fn=init_fn)
+        #     self.model.model = FSDP(self.model.model, device_id=self.trainer.strategy.root_device.index, auto_wrap_policy=auto_wrap_policy, sync_module_states=True, mixed_precision=mixed_precision, limit_all_gathers=True, use_orig_params=True, param_init_fn=init_fn)
+        #     if self.teacher is not None:
+        #         self.teacher.model = FSDP(self.teacher.model, device_id=self.trainer.strategy.root_device.index, auto_wrap_policy=auto_wrap_policy, sync_module_states=True, mixed_precision=mixed_precision, limit_all_gathers=True, use_orig_params=True, param_init_fn=init_fn)
+
+
+    def configure_specific_model(self, model, maybe_do_reset):
+        do_reset = False
+        if maybe_do_reset:
+            if self.config.train is not None:
+                if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (1,2)):
+                    do_reset = True
+
+        # we require that the module supports configure_model for this code to work well
+        #if hasattr(self.model, 'configure_model'):
+        #with self.trainer.init_module(empty_init=True): # FIXME - we can probably use this instead of meta then convert to dtype then to_empty
+        with init_on_meta_device():
+            model.configure_model()
+
+        dtype_map = {"bf16-true":torch.bfloat16, "bf16-mixed":torch.bfloat16, "16-true":torch.float16, "16-mixed":torch.float16, "32-true":torch.float32}
+        dtype = dtype_map[self.trainer.precision]
+
+        print("Moving model to dtype ", dtype)
+        model.to(dtype=dtype)
+        if 'fsdp' in self.config.train.strategy:
+            if self.trainer.local_rank == 0:
+                if do_reset:
+                    # NOTE - we could put it on cpu here for truly huge models, but it's a LOT faster to reset parameters on GPU
+                    print("Moving model to empty on", self.device)
+                    model.to_empty(device=self.device, recurse=True)
+                else:
+                    print("Moving model to empty on cpu")
+                    model.to_empty(device=torch.device('cpu'), recurse=True)
+            # else leave it as a meta tensor on non-zero ranks... FSDP will convert
+        else:
+            print("Moving model to empty on", self.device)
+            model.to_empty(device=self.device, recurse=True)
+
+        if self.trainer.local_rank == 0:
+            # reset parameters, if needed
+            if maybe_do_reset:
+                # NOTE - we do this on GPU because it's a lot faster! (even though it might not fit for truly giant models)
+                if self.config.train is not None:
+                    if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (1,2)):
+                        print("Resetting parameters")
+                        for submodule in model.modules():
+                            if hasattr(submodule, 'reset_parameters'):
+                                submodule.reset_parameters()
+
+            if 'deepspeed_stage_3' in self.config.train.strategy or 'fsdp' in self.config.train.strategy:
+                print("Moving model back to CPU, so giant models have room to get sharded")
+                model.to(device=torch.device('cpu'))
 
     def configure_gradient_clipping(
             self,
@@ -98,6 +153,8 @@ class LightningModelWrapper(pl.LightningModule):
             gradient_clip_val = None,
             gradient_clip_algorithm = None,
     ):
+        if gradient_clip_val is None or gradient_clip_val <= 0:
+            return
         if 'fsdp' in self.config.train.strategy:
             assert gradient_clip_algorithm in ('norm', None), gradient_clip_algorithm
             #self.model.clip_grad_norm_(gradient_clip_val)
@@ -106,6 +163,7 @@ class LightningModelWrapper(pl.LightningModule):
             #if gradient_clip_algorithm == 'norm':
                 #torch.nn.utils.clip_grad_norm_(self.model.parameters(), gradient_clip_val)
             self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val) #self.config.train.gradient_clip_val)
+            #self.model.model.clip_grad_norm_(gradient_clip_val) #self.config.train.gradient_clip_val)
         else:
             self.clip_gradients(optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm)
 
@@ -179,14 +237,15 @@ class LightningModelWrapper(pl.LightningModule):
         config = self.config
         ckpt_path = config.train.load_model
         if ckpt_path != '':
-            self.load_model_weights(self.model, ckpt_path)
+            self.load_specific_model_weights(self.model, ckpt_path)
+            self.model.set_grads()
         
         if self.teacher is not None and config.train.teacher is not None:
            teacher_ckpt_path = config.train.teacher.path
            if teacher_ckpt_path != '':
-               self.load_model_weights(self.teacher, teacher_ckpt_path)
+               self.load_specific_model_weights(self.teacher, teacher_ckpt_path)
 
-    def load_model_weights(self, model, ckpt_path):
+    def load_specific_model_weights(self, model, ckpt_path):
         config = self.config
 
         if 'fsdp' in config.train.strategy:
@@ -316,6 +375,13 @@ class LightningModelWrapper(pl.LightningModule):
         print("Configuring optimizers!!!")
 
         betas = (train_config.beta1, train_config.beta2)
+        if train_config.optimizer == 'adamw':
+            import torch.optim
+            self.optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps)
+            return self.optimizer
+        if train_config.optimizer == 'dsfusedadamw':
+            from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+            return FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
         if train_config.optimizer == 'adamwschedulefree':
             import schedulefree
             self.optimizer = schedulefree.AdamWScheduleFree(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps)
@@ -334,8 +400,9 @@ class LightningModelWrapper(pl.LightningModule):
             from src.optimizers.lion import Lion
             return Lion(optim_groups, train_config.lr_init, betas, use_fp16=train_config.optimizer == 'lionfp16')
         if self.deepspeed_offload:
+            from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
             return DeepSpeedCPUAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
-        return FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
+        return None# FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
 
     def on_fit_start(self) -> None:
         if 'schedulefree' in self.config.train.optimizer:
@@ -386,10 +453,10 @@ class LightningModelWrapper(pl.LightningModule):
         causal_mask = torch.full((T, T), fill_value=-torch.inf, dtype=torch.bfloat16, device=x.device).triu(1)
         causal_mask = causal_mask[None, None, :, :].expand(B, 1, -1, -1)
 
-        if self.training and self.config.train.attention_distillation_stage in (1, 20, 2):
+        if self.training and self.config.train.attention_distillation_stage in (1, 21, 2):
             stage = self.config.train.attention_distillation_stage
             output_attentions = stage == 1
-            output_post_attention_hidden_states = stage in (20, 2)
+            output_post_attention_hidden_states = stage in (21, 2)
             # special code for attention output and/or attention matrix loss
             if self.config.model.hf_path != '':
                 results = self.model.forward(x, output_hidden_states=False, output_attentions=True)
@@ -403,12 +470,66 @@ class LightningModelWrapper(pl.LightningModule):
             if self.config.model.hf_path == '':
                 if stage == 1:
                     reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0)).mean() / results.attentions[0].size(-1)
-                else: # stage in (20, 2):
-                    reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                else: # stage in (21, 2):
+                    #reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    reported_loss = training_loss = F.mse_loss(torch.cat(results.student_post_attention_hidden_states, dim=0), torch.cat(results.post_attention_hidden_states, dim=0))
                     #reported_loss = training_loss = torch.stack(results.post_attention_hidden_states, dim=0).mean()
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
+
+        if self.training and self.config.train.attention_distillation_stage == 33:
+            results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
+            self.teacher.eval()
+            with torch.no_grad():
+                teacher_results = self.teacher.forward(x, output_hidden_states=True)
+            #reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.hidden_states[1:], dim=0) - torch.cat(results.hidden_states[1:], dim=0), dim=-1).mean() * (results.hidden_states[0].size(-1) ** -0.5)
+
+            student_logits = results.logits
+            flat_student_logits = student_logits.view(-1, student_logits.size(-1))
+            with torch.no_grad():
+                preds = student_logits.argmax(dim=-1)
+
+            teacher_logits = teacher_results.logits
+            flat_teacher_logits = teacher_logits.view(-1, teacher_logits.size(-1))
+
+            chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
+            chunk_len = 512
+            n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
+
+            # memory saving measure, because otherwise kl_div tried to allocate everything all at once
+            distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+            for c in range(0, flat_student_logits.size(0), chunk_len):
+                student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
+                teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                distillation_loss = distillation_loss + F.kl_div(
+                    student_log_softmax,
+                    teacher_log_softmax,
+                    log_target=True,
+                    reduction='batchmean'
+                )
+            distillation_loss = distillation_loss / n_chunks
+
+            #reported_loss = training_loss = distillation_loss + torch.linalg.vector_norm(teacher_results.hidden_states[-1] - results.hidden_states[-1], dim=-1).mean() * (results.hidden_states[0].size(-1) ** -0.5)
+            hidden_states_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+            for layer_id in range(1,len(results.hidden_states)-1):
+                hidden_states_loss = hidden_states_loss + torch.linalg.vector_norm(teacher_results.hidden_states[layer_id] - results.hidden_states[layer_id], dim=-1).mean() / (len(results.hidden_states)-2) * (results.hidden_states[0].size(-1) ** -0.5)
+            reported_loss = training_loss = distillation_loss + hidden_states_loss
+            logits = torch.tensor([], device=x.device)
+            return reported_loss, training_loss, logits, preds, last_model_state
+
+        # if self.training and self.config.train.attention_distillation_stage == 3:
+        #     results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
+        #     self.teacher.eval()
+        #     with torch.no_grad():
+        #         teacher_results = self.teacher.forward(x, output_hidden_states=True)
+        #     # FIXME - argh this doesn't work because FSDP slices up the lm_head.weight so we can't use it here
+        #     print(results.hidden_states[-1].view(-1, results.hidden_states[-1].size(-1)).shape, teacher_results.hidden_states[-1].view(-1, teacher_results.hidden_states[-1].size(-1)).shape, self.model.lm_head.weight.shape, self.teacher.lm_head.weight.shape)
+        #     exit()
+        #     reported_loss = training_loss = self.kl_div_loss(results.hidden_states[-1].view(-1, results.hidden_states[-1].size(-1)), teacher_results.hidden_states[-1].view(-1, teacher_results.hidden_states[-1].size(-1)), self.model.lm_head.weight, self.teacher.lm_head.weight)
+        #     logits = torch.tensor([], device=x.device)
+        #     preds = torch.zeros_like(y)
+        #     return reported_loss, training_loss, logits, preds, last_model_state
 
         if self.config.model.hf_path != '':
             results = self.model(x, output_hidden_states=False)
@@ -431,19 +552,23 @@ class LightningModelWrapper(pl.LightningModule):
         flat_student_logits = logits.view(-1, logits.size(-1))
         flat_labels = y.view(-1)
 
+        reported_loss = training_loss = distillation_loss = ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+
         chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
-        if not chunk_loss_calcs:
-            reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
-        else:
-            # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
-            chunk_len = 512
-            n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
-            ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
-            for c in range(0, flat_student_logits.size(0), chunk_len):
-                ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
-            ce_loss = ce_loss / n_chunks
-            reported_loss = training_loss = ce_loss
-        
+        chunk_len = 512
+        n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
+        if not self.training or self.teacher is None or self.config.train.teacher.ce_weight > 0:
+            if not chunk_loss_calcs:
+                reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
+            else:
+                # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
+                ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+                for c in range(0, flat_student_logits.size(0), chunk_len):
+                    ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
+                    #ce_loss = ce_loss + self.cross_entropy_loss(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
+                ce_loss = ce_loss / n_chunks
+                reported_loss = training_loss = ce_loss
+
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 
@@ -469,20 +594,22 @@ class LightningModelWrapper(pl.LightningModule):
                 # memory saving measure, because otherwise kl_div tried to allocate everything all at once
                 distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
                 for c in range(0, flat_student_logits.size(0), chunk_len):
-                        student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
-                        teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
-                        distillation_loss = distillation_loss + F.kl_div(
-                            student_log_softmax,
-                            teacher_log_softmax,
-                            log_target=True,
-                            reduction='batchmean'
-                        )
+                    student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
+                    teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                    distillation_loss = distillation_loss + F.kl_div(
+                        student_log_softmax,
+                        teacher_log_softmax,
+                        log_target=True,
+                        reduction='batchmean'
+                    )
+                    # MSE version (was slightly worse)
+                    # distillation_loss = distillation_loss + F.mse_loss(flat_student_logits[c:c+chunk_len], flat_teacher_logits[c:c+chunk_len])
                 distillation_loss = distillation_loss / n_chunks
-            
+
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
             if self.config.train.teacher.ce_weight > 0:
                 training_loss = training_loss + ce_loss * self.config.train.teacher.ce_weight
-            #reported_loss = training_loss
+            reported_loss = training_loss
             if batch_idx % 10 == 0:
                 print(f"kl_div:{distillation_loss.item()}, ce_loss:{ce_loss.item()}")
 

@@ -4,7 +4,7 @@ model:
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: corpus-16384-3
+  proj_suffix: rwkv7-corpus-16384-3
   train_stage: 3
   load_partial: 0
 

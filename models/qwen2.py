@@ -35,8 +35,8 @@ elif 'rwkv7' in ATTENTION_TYPE:
 
     if ATTENTION_TYPE == 'rwkv7':
         ATTENTION_TYPE = 'rwkv7_wind_triton_bighead'
-    if torch.version.hip and 'fla_' not in ATTENTION_TYPE:
-        ATTENTION_TYPE ='rwkv7_wind_triton_bighead'
+    # if torch.version.hip and 'fla_' not in ATTENTION_TYPE:
+    #     ATTENTION_TYPE ='rwkv7_wind_triton_bighead'
 
     if ATTENTION_TYPE == 'rwkv7_fla_chunk':
         from fla.ops.rwkv7.chunk import chunk_rwkv7
@@ -45,15 +45,13 @@ elif 'rwkv7' in ATTENTION_TYPE:
             dtype = r.dtype
             r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
             log_w = -log_neglog_w.float().exp()
-            log_w = log_w.to(r)
-            return chunk_rwkv7(r=r, log_w=log_w, k=k, v=v, a=a, b=b, output_final_state=False)[0].to(dtype)
+            return chunk_rwkv7(r=r, w=log_w, k=k, v=v, a=a, b=b, output_final_state=False)[0].to(dtype)
     elif ATTENTION_TYPE == 'rwkv7_fla_fused_recurrent':
         from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
         def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
             B,T,_ = r.shape
             r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
             log_w = -log_neglog_w.float().exp()
-            log_w = log_w.to(r)
             return fused_recurrent_rwkv7(r, log_w, k, v, a, b, output_final_state=False)[0]
     elif ATTENTION_TYPE == 'rwkv7_wind_triton':
         from rwkv7_attn_triton import attn_triton
@@ -113,7 +111,7 @@ elif 'rwkv7' in ATTENTION_TYPE:
             q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,-1)
             
-    elif ATTENTION_TYPE == 'rwkv7_wind_backstepping':
+    elif 'rwkv7_wind_backstepping' in ATTENTION_TYPE:
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
@@ -157,10 +155,10 @@ elif 'rwkv7' in ATTENTION_TYPE:
                 torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
                 return dw,dq,dk,dv,dz,db
 
-        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,num_heads:int) -> torch.Tensor:
+        def RUN_CUDA_RWKV7g(q,log_neglog_w,k,v,a,b,num_heads:int) -> torch.Tensor:
             B,T,HC = q.shape
-            q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
-            return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,-1)
+            q,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,log_neglog_w,k,v,a,b]]
+            return WindBackstepping.apply(log_neglog_w,q,k,v,a,b).view(B,T,-1)
     elif ATTENTION_TYPE == 'rwkv7_cuda':
         DTYPE = torch.bfloat16
         XTYPE = torch.float
@@ -968,7 +966,7 @@ class Qwen2DecoderLayer(nn.Module):
 
         self.teacher_attn = None
         if config.train is not None:
-            if config.train.attention_distillation_stage in (1, 20, 2):
+            if config.train.attention_distillation_stage in (1, 21, 2):
                 self.teacher_attn = TMix_qwen2(args, layer_id)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
@@ -1030,9 +1028,8 @@ class Qwen2Decoder(nn.Module):
         B, T, C = x.size()
 
         shared = self.shared
-        if config.rope is not None and shared.angles.size(0) == 0:
-            # FIXME - forcing at least 1024ctxlen RoPE for mmlu
-            max_ctx_len = max(1024, config.ctx_len)
+        if config.rope is not None and T > shared.angles.size(0):
+            max_ctx_len = max(config.ctx_len, T)
             shared.angles = generate_rotary_embedding(max_ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
 
         assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
@@ -1084,6 +1081,12 @@ class Qwen2Decoder(nn.Module):
                 student_post_attention_hidden_states_outputs += (student_post_attention_hidden_states,)
 
         x = self.norm(x)
+
+        # FIXME - we added one after the norm so we can include that (calling it from externally messes up FSDP)
+        if output_hidden_states:
+            hidden_states_outputs += (x,)
+            student_hidden_states_outputs += (x,)
+
         return LLMOutput(x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs, student_attentions_outputs, student_post_attention_hidden_states_outputs)
         #return x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs # FIXME - not updating state at all
 
@@ -1102,8 +1105,6 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.model = None
 
-        self.configure_model()
-
     def configure_model(self):
         if self.model is not None: 
             return
@@ -1112,6 +1113,68 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.lm_head = nn.Linear(self.config.model.n_embd, self.config.model.vocab_size, bias=False)
 
+    def set_grads(self):
+        train_config = self.config.train
+        if train_config is not None:
+            if train_config.attention_distillation_stage in (1, 21, 2):
+                self.requires_grad_(False)
+                for decoder_layer in self.model.layers:
+                    if train_config.attention_distillation_stage == 1:
+                        decoder_layer.self_attn.time_maa_x.requires_grad_(True)
+                        decoder_layer.self_attn.time_maa_r.requires_grad_(True)
+                        decoder_layer.self_attn.time_maa_k.requires_grad_(True)
+                        decoder_layer.self_attn.time_maa_w.requires_grad_(True)
+                        decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
+                        decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
+                        decoder_layer.self_attn.time_decay.requires_grad_(True)
+                        decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
+                        decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
+                        # FIXME - wow we removed q, k here by accident and it.. helped??!?!
+                        # decoder_layer.self_attn.q_proj.requires_grad_(True)
+                        # decoder_layer.self_attn.k_proj.requires_grad_(True)
+                    elif train_config.attention_distillation_stage == 21:
+                        decoder_layer.self_attn.requires_grad_(True)
+                        #decoder_layer.self_attn.q_proj.requires_grad_(False)
+                        #decoder_layer.self_attn.k_proj.requires_grad_(False)
+                        # decoder_layer.self_attn.v_proj.requires_grad_(False)
+                        # decoder_layer.self_attn.o_proj.requires_grad_(False)
+                    elif train_config.attention_distillation_stage == 2:
+                        decoder_layer.self_attn.requires_grad_(True)
+                        # decoder_layer.self_attn.k_proj.requires_grad_(False)
+                        # decoder_layer.self_attn.v_proj.requires_grad_(False)
+            # elif train_config.attention_distillation_stage == 3:
+            #     # Harrison's possible fix for v_first explosion during stage 3
+            #     for decoder_layer in self.model.layers:
+            #         decoder_layer.self_attn.v_proj.requires_grad_(False)
+            #         break
+            # elif train_config.attention_distillation_stage == 3:
+            #     self.requires_grad_(False)
+            #     # self.model.embed_tokens.requires_grad_(False)
+            #     # self.model.norm.requires_grad_(False)
+            #     # self.lm_head.requires_grad_(False)
+            #     layer_id = -1
+            #     for decoder_layer in self.model.layers:
+            #         layer_id += 1
+            #         if layer_id >= self.config.model.n_layer // 2:
+            #             decoder_layer.requires_grad_(True)
+
+            #     self.requires_grad_(False)
+            #     # self.model.embed_tokens.requires_grad_(False)
+            #     # self.model.norm.requires_grad_(False)
+            #     # self.lm_head.requires_grad_(False)
+
+            #         decoder_layer.self_attn.requires_grad_(True)
+            #         # decoder_layer.self_attn.k_proj.requires_grad_(False)
+            #         # decoder_layer.self_attn.v_proj.requires_grad_(False)
+
+            # FIXME - remove these for full training
+            # for decoder_layer in self.model.layers:
+            #     decoder_layer.post_attention_layernorm.requires_grad_(False)
+            #     decoder_layer.mlp.requires_grad_(False)
+            # self.model.embed_tokens.requires_grad_(False)
+            # self.model.norm.requires_grad_(False)
+            # self.lm_head.requires_grad_(False)
+
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
         #print("teacher q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
         results = self.model(token_ids, last_model_state=last_model_state, output_hidden_states=output_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
@@ -1119,53 +1182,11 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         return results
     
     def get_optim_groups(self):
-        # separates groups for weight decay and non-weight decay
+        self.set_grads()
 
         train_config = self.config.train
 
-        if train_config.attention_distillation_stage in (1, 20, 2):
-            self.requires_grad_(False)
-            for decoder_layer in self.model.layers:
-                if train_config.attention_distillation_stage == 1:
-                    decoder_layer.self_attn.time_maa_x.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_r.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_k.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_w.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
-                    decoder_layer.self_attn.time_decay.requires_grad_(True)
-                    decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
-                    decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
-                    # FIXME - wow we removed q, k here by accident and it.. helped??!?!
-                    # decoder_layer.self_attn.q_proj.requires_grad_(True)
-                    # decoder_layer.self_attn.k_proj.requires_grad_(True)
-                elif train_config.attention_distillation_stage == 20:
-                    decoder_layer.self_attn.requires_grad_(True)
-                    #decoder_layer.self_attn.q_proj.requires_grad_(False)
-                    #decoder_layer.self_attn.k_proj.requires_grad_(False)
-                    decoder_layer.self_attn.v_proj.requires_grad_(False)
-                    decoder_layer.self_attn.o_proj.requires_grad_(False)
-                elif train_config.attention_distillation_stage == 2:
-                    decoder_layer.self_attn.requires_grad_(True)
-                    # decoder_layer.self_attn.k_proj.requires_grad_(False)
-                    # decoder_layer.self_attn.v_proj.requires_grad_(False)
-        # elif train_config.attention_distillation_stage == 3:
-        #     self.requires_grad_(False)
-        #     # self.model.embed_tokens.requires_grad_(False)
-        #     # self.model.norm.requires_grad_(False)
-        #     # self.lm_head.requires_grad_(False)
-        #     for decoder_layer in self.model.layers:
-        #         decoder_layer.self_attn.requires_grad_(True)
-        #         # decoder_layer.self_attn.k_proj.requires_grad_(False)
-        #         # decoder_layer.self_attn.v_proj.requires_grad_(False)
-
-        # FIXME - remove these for full training
-        # for decoder_layer in self.model.layers:
-        #     decoder_layer.post_attention_layernorm.requires_grad_(False)
-        #     decoder_layer.mlp.requires_grad_(False)
-        # self.model.embed_tokens.requires_grad_(False)
-        # self.model.norm.requires_grad_(False)
-        # self.lm_head.requires_grad_(False)
+        # separates groups for weight decay and non-weight decay
 
         # JIT at last minute
         for decoder_layer in self.model.layers:
@@ -1174,38 +1195,40 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         lr_decay = set()
         lr_1x = set()
-        lr_fp32 = set()
+        #lr_fp32 = set()
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if 'lm_head.weight' in n or 'embed_tokens.weight' in n:
-                lr_fp32.add(n)
-            elif (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
+            # if 'lm_head.weight' in n or 'embed_tokens.weight' in n:
+            #     lr_fp32.add(n)
+            # el
+            # NOTE - this check is no good in FSDP because the tensors end up with some stupid fake shape
+            #if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
+            if train_config.weight_decay > 0 and '.bias' not in n and 'norm' not in n and 'ln' not in n:
                 lr_decay.add(n)
             else:
                 lr_1x.add(n)
 
         param_dict = {n: p for n, p in self.named_parameters()}
-        param_check = list(lr_decay) + list(lr_1x) + list(lr_fp32)
+        #param_check = list(lr_decay) + list(lr_1x) + list(lr_fp32)
         #if not train_config.load_partial and (train_config.teacher is None or train_config.teacher.attention_distillation_stage ==3):
         #    assert sorted(param_dict) == sorted(param_check)
 
         lr_decay = sorted(list(lr_decay))
         lr_1x = sorted(list(lr_1x))
-        lr_fp32 = sorted(list(lr_fp32))
+        #lr_fp32 = sorted(list(lr_fp32))
         
-        # print('decay', lr_decay, '\n')
-        # print('1x', lr_1x, '\n')
+        print('1x', len(lr_1x), '\n')
+        print('decay', len(lr_decay), '\n')
         # print('fp32', lr_fp32, '\n')
-
         
         optim_groups = [
-            {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "use_fp16": True, "my_lr_scale": 1.0, 'name':'lr_1x'},
+            {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
         ]
-        if len(lr_fp32) > 0:
-            optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_tiny'}]
+        # if len(lr_fp32) > 0:
+        #     optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_fp32'}]
         if len(lr_decay) > 0:
-            optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "use_fp16": True, "my_lr_scale": 1.0, 'name':'lr_decay'}]
+            optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
 
         return optim_groups    
 

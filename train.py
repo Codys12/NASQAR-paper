@@ -246,19 +246,6 @@ if __name__ == "__main__":
         torch.set_default_dtype(old_dtype)
 
     ctx = nullcontext
-    if 'fsdp' in config.train.strategy:
-        # if trainer.local_rank == 0:
-        #     print('ctx rank0')
-        #     ctx = partial(trainer.init_module, empty_init=True)
-        #     #from lightning.fabric.utilities.init import _EmptyInit
-        #     #ctx = _EmptyInit
-        # else:
-        #     print('ctx rank other meta')
-        #     ctx = init_on_meta_device
-        #     #ctx = partial(torch.device, "meta")
-        #     #ctx = partial(dualcontextmanager, init_on_meta_device, partial(default_dtype_manager, torch.bfloat16))# trainer.strategy.precision_plugin.tensor_init_context)
-
-        ctx = init_on_meta_device
 
     teacher = None
     teacher_factory = None
@@ -285,14 +272,6 @@ if __name__ == "__main__":
             else:
                 teacher = Transformer(teacher_config)
 
-            if hasattr(teacher, 'configure_model'):
-                print("configuring TEACHER")
-                teacher.configure_model()
-
-            teacher.eval()
-            teacher.requires_grad_(False)            
-
-    #with trainer.init_module(empty_init=not config.train.load_partial):
     if True:
         print("Instantiating student model")
         attention_distillation_stage = config.train.attention_distillation_stage
@@ -364,10 +343,6 @@ if __name__ == "__main__":
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
     wrapper = LightningModelWrapper(model, config, teacher, trainer) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
-
-    if 'fsdp' in config.train.strategy:
-        if trainer.local_rank == 0:
-            wrapper.to_empty(device=torch.device('cpu'), recurse=True)
 
     print("Creating DataLoader")
 

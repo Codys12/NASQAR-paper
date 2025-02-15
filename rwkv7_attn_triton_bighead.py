@@ -330,7 +330,7 @@ class TritonRWKV7(th.autograd.Function):
         B,T,H,C = w.shape
         assert T%K == 0
         assert C%16 == 0
-        s0 = th.zeros(B,H,C,C, dtype=w.dtype,device=w.device) if s0 is None else s0
+        s0 = th.zeros(B,H,C,C, dtype=th.float32,device=w.device) if s0 is None else s0
         y = th.empty_like(v)
         sT = th.empty_like(s0)
         s = th.zeros(B,H,T//K,C,C, dtype=th.float32,device=w.device)
