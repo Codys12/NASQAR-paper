@@ -724,11 +724,13 @@ class TMix_qwen2rwkv7(TMix_qwen2):
                     shape = x.shape
                     if len(shape) == 2:
                         gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
-                        nn.init.orthogonal_(x, gain=gain * scale)
+                        #nn.init.orthogonal_(x, gain=gain * scale)
+                        x.copy_(nn.init.orthogonal_(torch.empty_like(x, dtype=torch.float32), gain=gain * scale))
                     elif len(shape) == 3:
                         gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
                         for i in range(shape[0]):
-                            nn.init.orthogonal_(x[i], gain=gain * scale)
+                            #nn.init.orthogonal_(x[i], gain=gain * scale)
+                            x[i].copy_(nn.init.orthogonal_(torch.empty_like(x[i], dtype=torch.float32), gain=gain * scale))                            
                     else:
                         assert False
                     return x
