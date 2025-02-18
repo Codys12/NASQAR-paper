@@ -792,7 +792,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
 
 
         input_seq_len = x.size(1)
-        if input_seq_len % 16 != 0:
+        if self.training and 'rwkv7_fla' not in self.config.attention_type and input_seq_len % 16 != 0:
             x = F.pad(x, (0, 0, 0, 16 - input_seq_len%16))
         B, T, C = x.size()
         H = self.num_heads
@@ -1032,7 +1032,7 @@ class Qwen2Decoder(nn.Module):
 
         shared = self.shared
         if config.rope is not None and T > shared.angles.size(0):
-            max_ctx_len = max(config.ctx_len, T)
+            max_ctx_len = max(config.ctx_len, (T + 15) // 16 * 16)
             shared.angles = generate_rotary_embedding(max_ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
 
         assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
