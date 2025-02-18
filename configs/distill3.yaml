@@ -1,5 +1,5 @@
 model:
-  attention_type: rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # 
+  attention_type: rwkv7_fla_chunk #rwkv7_wind_backstepping # rwkv7_wind_triton_bighead #
   ctx_len: 512
 
 train:
