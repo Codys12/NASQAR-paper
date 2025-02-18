@@ -1060,7 +1060,7 @@ class Qwen2Decoder(nn.Module):
             token_ids = torch.tensor(token_ids, device=self.embed_tokens.weight.device, dtype=torch.long, requires_grad=False)[None, :]
 
         eos_token_id = 151643 # "<|endoftext|>"
-        reset_mask = F.pad(token_ids == eos_token_id, (1, -1), value=False)
+        reset_mask = token_ids == eos_token_id # state needs to be reset at the beginning of the EOS token processing, since we're predicting the next token based on ZERO state!
 
         x = self.embed_tokens(token_ids)
 
