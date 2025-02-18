@@ -691,7 +691,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
-            -7.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+            -6.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 0.15 * ratio_0_to_1 ** 0.5)
+            #-7.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
             for n in range(self.num_heads * self.qk_head_dim)
         ]
 
@@ -822,7 +823,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         xr = xw = xk = xv = xa = xg = x
 
         r = self.q_proj(xr)
-        w_base = self.w0 + torch.tanh(xw @ self.w1) @ self.w2
+        w = torch.tanh(xw @ self.w1) @ self.w2
         k = self.k_proj(xk)
         v = self.v_proj(xv)
         # dk = self.key(torch.tanh(k))
@@ -832,7 +833,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #g = torch.sigmoid(self.gate(xg))
 
         # FIXME - adding w0 twice here!!! its also added above
-        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w_base).float()) # FIXME - we had tried 0-softplus before
+        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w).float()) # FIXME - we had tried 0-softplus before
         #log_neglog_w = 1 - torch.nn.functional.softplus(-w)
         #log_w = -log_neglog_w.exp()
         #w = log_w.exp()
