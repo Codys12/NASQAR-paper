@@ -577,7 +577,7 @@ class LightningModelWrapper(pl.LightningModule):
                     for c in range(0, flat_student_logits.size(0), chunk_len):
                         ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len], reduction='sum')
                             #ignore_index=eos_token_id, reduction='sum')
-                    ce_loss = ce_loss / flat_student_logits.size(-1) 
+                    ce_loss = ce_loss / flat_student_logits.size(0) 
                     # / (flat_loss_mask.sum() + 1e-8) # FIXME - this isn't right to divide by this
                 reported_loss = training_loss = ce_loss
 
