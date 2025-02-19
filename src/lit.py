@@ -272,7 +272,7 @@ class LightningModelWrapper(pl.LightningModule):
                     if '.self_attn.' in k:
                         load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
-        strict = not config.train.load_partial and config.train.attention_distillation_stage != 3
+        strict = not config.train.load_partial #and config.train.attention_distillation_stage != 3
 
         if 'deepspeed_stage_3' not in config.train.strategy:
             model.load_state_dict(load_dict, strict=strict)

@@ -959,7 +959,9 @@ class Qwen2DecoderLayer(nn.Module):
 
         cmix = CMix_qwen2(args, layer_id)
 
-        if 'rwkv6' in args.attention_type:
+        if layer_id >= args.n_layer - args.preserve_last_n_layers:
+            self.self_attn = TMix_qwen2(args, layer_id)
+        elif 'rwkv6' in args.attention_type:
             self.self_attn = TMix_qwen2rwkv6(args, layer_id)
         elif 'rwkv7' in args.attention_type:
             self.self_attn = TMix_qwen2rwkv7(args, layer_id)
