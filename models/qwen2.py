@@ -1200,13 +1200,13 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         lr_decay = set()
         lr_1x = set()
-        #lr_fp32 = set()
+        lr_fp32 = set()
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            # if 'lm_head.weight' in n or 'embed_tokens.weight' in n:
+            # if 'lm_head' in n or 'embed_tokens' in n:
             #     lr_fp32.add(n)
-            # el
+            #     continue
             # NOTE - this check is no good in FSDP because the tensors end up with some stupid fake shape
             #if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
             if train_config.weight_decay > 0 and '.bias' not in n and 'norm' not in n and 'ln' not in n:
@@ -1221,17 +1221,18 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         lr_decay = sorted(list(lr_decay))
         lr_1x = sorted(list(lr_1x))
-        #lr_fp32 = sorted(list(lr_fp32))
+        lr_fp32 = sorted(list(lr_fp32))
         
         print('1x', len(lr_1x), '\n')
         print('decay', len(lr_decay), '\n')
-        # print('fp32', lr_fp32, '\n')
+        print('fp32', len(lr_fp32), '\n')
         
         optim_groups = [
             {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
         ]
-        # if len(lr_fp32) > 0:
-        #     optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_fp32'}]
+        if len(lr_fp32) > 0:
+            # FIXME - NOTE THIS VERY LOW LR SCALE!!!
+            optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.5, 'name':'lr_fp32'}]
         if len(lr_decay) > 0:
             optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
 
