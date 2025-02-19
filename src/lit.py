@@ -568,7 +568,7 @@ class LightningModelWrapper(pl.LightningModule):
             chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
             chunk_len = 512
             n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
-            if not self.training or self.teacher is None: # or self.config.train.teacher.ce_weight > 0:
+            if not self.training or self.teacher is None or self.config.train.teacher.ce_weight > 0:
                 if not chunk_loss_calcs:
                     ce_loss = F.cross_entropy(flat_student_logits, flat_labels, reduction='mean') #, ignore_index=eos_token_id)
                 else:
