@@ -456,6 +456,13 @@ class LightningModelWrapper(pl.LightningModule):
         token_ids = x
         eos_token_id = 151643 # "<|endoftext|>"
         loss_mask = token_ids != eos_token_id # shouldn't count loss of prediction from an EOS token, since it's got no information useful for predicting it!
+        #loss_mask = torch.ones_like(token_ids)
+
+        # inverted_loss_mask = (token_ids == eos_token_id).long()
+        # for i in range(len(inverted_loss_mask)):
+        #     row_mask = inverted_loss_mask[i]
+        #     first_occurrence = row_mask.argmax() if row_mask.any() else len(inverted_loss_mask[i])
+        #     loss_mask[i, first_occurrence + 1:] = False
 
         if self.training and self.config.train.attention_distillation_stage in (1, 21, 2):
             stage = self.config.train.attention_distillation_stage
@@ -622,6 +629,14 @@ class LightningModelWrapper(pl.LightningModule):
                             log_target=False,
                             reduction='sum',
                         )
+                        # student_log_softmax = torch.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask
+                        # teacher_log_softmax = torch.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask
+                        # distillation_loss = distillation_loss + F.kl_div(
+                        #     student_log_softmax,
+                        #     teacher_log_softmax,
+                        #     log_target=True,
+                        #     reduction='sum',
+                        # )
                         # student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
                         # teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
                         # distillation_loss = distillation_loss + F.kl_div(

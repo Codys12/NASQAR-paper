@@ -691,8 +691,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
-            -6.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 0.15 * ratio_0_to_1 ** 0.5)
-            #-7.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+            -7.0 + 5.0 * (n / (self.num_heads * self.qk_head_dim - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
             for n in range(self.num_heads * self.qk_head_dim)
         ]
 
@@ -832,8 +831,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         g = torch.sigmoid(xg @ self.g1) @ self.g2
         #g = torch.sigmoid(self.gate(xg))
 
-        # FIXME - adding w0 twice here!!! its also added above
-        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w).float()) # FIXME - we had tried 0-softplus before
+        # FIXME - adding w0 twice here!!!
+        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + self.w0 + w).float()) # FIXME - we had tried 0-softplus before
         #log_neglog_w = 1 - torch.nn.functional.softplus(-w)
         #log_w = -log_neglog_w.exp()
         #w = log_w.exp()
@@ -911,6 +910,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
         #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
+        
+        # if self.training:
+        #     x[reset_mask] = 0.0
 
         if input_seq_len != T:
             x = x[:, :input_seq_len]
@@ -1147,6 +1149,13 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                         decoder_layer.self_attn.requires_grad_(True)
                         # decoder_layer.self_attn.k_proj.requires_grad_(False)
                         # decoder_layer.self_attn.v_proj.requires_grad_(False)
+            # elif train_config.attention_distillation_stage == 3:
+            #     layer_id = -1
+            #     for decoder_layer in self.model.layers:
+            #         layer_id += 1
+            #         if layer_id >= self.config.model.n_layer - self.config.model.preserve_last_n_layers:
+            #             decoder_layer.requires_grad_(False)
+
             # elif train_config.attention_distillation_stage == 3:
             #     # Harrison's possible fix for v_first explosion during stage 3
             #     for decoder_layer in self.model.layers:
