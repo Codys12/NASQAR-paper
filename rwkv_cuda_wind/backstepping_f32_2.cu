@@ -151,11 +151,7 @@ void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y,
 void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy, float*s, float*sa, bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da) {
     assert(T%_CHUNK_LEN_ == 0);
     int shared_mem = _C_*(_C_+1)*4;
-#ifndef __HIP_PLATFORM_AMD__
-    assert(!cudaFuncSetAttribute(backward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
-#else
-    assert(!hipFuncSetAttribute(backward_kernel, hipFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
-#endif
+    assert(!cudaFuncSetAttribute((const void*)backward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
     backward_kernel<<<dim3(H,B), dim3(_C_), shared_mem>>>(T,H,w,q,k,v,z,a,dy,s,sa,dw,dq,dk,dv,dz,da);
 }
 

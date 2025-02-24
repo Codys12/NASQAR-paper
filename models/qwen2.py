@@ -121,13 +121,17 @@ elif 'rwkv7' in ATTENTION_TYPE:
             else:
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
-        VERSION = 1 if HEAD_SIZE < 128 else 2
-
-
-        if ATTENTION_TYPE == 'rwkv7_wind_backstepping_full':
-            sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu']
+        if ATTENTION_TYPE == 'rwkv7_wind_backstepping_smallhead':
+            VERSION = 1
+        elif ATTENTION_TYPE == 'rwkv7_wind_backstepping_bighead':
+            VERSION = 2
         else:
-            sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}.cu', f'rwkv_cuda_wind/backstepping_f32_cpp.cu']
+            VERSION = 1 if HEAD_SIZE < 128 else 2
+
+        #if ATTENTION_TYPE == 'rwkv7_wind_backstepping_full':
+        #    sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu']
+        #else:
+        sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}.cu', f'rwkv_cuda_wind/backstepping_f32_cpp.cu']
 
         #load(name="wind_backstepping", sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
         load(name="wind_backstepping", sources=sources, is_python_module=False, verbose=True, extra_cuda_cflags=flags)
