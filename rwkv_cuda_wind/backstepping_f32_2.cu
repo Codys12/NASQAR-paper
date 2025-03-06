@@ -1,11 +1,12 @@
 #include <cuda_bf16.h>
 using bf = __nv_bfloat16;
 #ifdef __HIP_PLATFORM_AMD__
-__device__ inline bf to_bf(const float & u) {
-float2 f2 = {u, 0.0f};
-__hip_bfloat162 bf2 = __float22bfloat162_rn(f2);
-return bf2.x;
-}
+// THIS KERNEL DOESNT WORK ON AMD ANYWAY DUE TO LACK OF DYNAMIC SHARED MEMORY SO DIE HERE
+//__device__ inline bf to_bf(const float & u) {
+//float2 f2 = {u, 0.0f};
+//__hip_bfloat162 bf2 = __float22bfloat162_rn(f2);
+//return bf2.x;
+//}
 #else
 __device__ inline bf to_bf(const float & u) { return 	__float2bfloat16_rn(u); }
 #endif
@@ -151,7 +152,7 @@ void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y,
 void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy, float*s, float*sa, bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da) {
     assert(T%_CHUNK_LEN_ == 0);
     int shared_mem = _C_*(_C_+1)*4;
-    assert(!cudaFuncSetAttribute((const void*)backward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
+    assert(!cudaFuncSetAttribute(backward_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
     backward_kernel<<<dim3(H,B), dim3(_C_), shared_mem>>>(T,H,w,q,k,v,z,a,dy,s,sa,dw,dq,dk,dv,dz,da);
 }
 
