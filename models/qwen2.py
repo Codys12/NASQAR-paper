@@ -111,7 +111,7 @@ elif 'rwkv7' in ATTENTION_TYPE:
             q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,-1)
             
-    elif 'rwkv7_wind_backstepping' in ATTENTION_TYPE:
+    elif ATTENTION_TYPE in ['rwkv7_wind_backstepping', 'rwkv7_wind_backstepping_smallhead', 'rwkv7_wind_backstepping_bighead']:
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
@@ -232,7 +232,9 @@ elif 'rwkv7' in ATTENTION_TYPE:
         def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
             return WKV_7g.apply(r, w, k, v, a, b, num_heads)  
     else:
-        assert ATTENTION_TYPE != ATTENTION_TYPE, 'bad attention type specified'
+        assert False, 'bad attention type specified'
+else:
+    assert False, 'bad attention type specified'
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
