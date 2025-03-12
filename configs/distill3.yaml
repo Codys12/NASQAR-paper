@@ -1,11 +1,11 @@
 model:
-  attention_type: rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # 
+  attention_type: rwkv6 #rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # rwkv7_wind_backstepping_smallhead
   ctx_len: 512
 
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: rwkv7-3
+  proj_suffix: rwkv6-3
   train_stage: 3
   load_partial: 0
 
@@ -18,8 +18,8 @@ train:
   #optimizer: adamwschedulefree
   lr_wait: 0.8
   lr_decay_type: linear
-  lr_init: 6.25e-6 #1e-5
-  lr_final: 6.25e-6 #1e-5
+  lr_init: 1e-5
+  lr_final: 1e-5
   warmup_steps: 50 
   beta1: 0.9 
   beta2: 0.95 

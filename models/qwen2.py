@@ -418,6 +418,56 @@ class TMix_qwen2rwkv6(TMix_qwen2):
 
     def __init__(self, config:Transformer_Config, layer_id):
         super().__init__(config, layer_id)
+    
+        n_layer = config.n_layer
+        n_embd = self.hidden_size
+        dim_att = self.num_heads * self.head_dim
+        layer_id = self.layer_id
+
+        # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+        # self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+        # self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+        # self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
+        # self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+
+        ddd = torch.empty(1, 1, n_embd)
+        self.time_maa_x = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_r = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_k = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_v = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_w = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_g = nn.Parameter(torch.empty_like(ddd))
+
+        calc_lora_rank = lambda exponent, multiplier: max(1, round(self.hidden_size ** exponent * multiplier / 32)) * 32
+        lora_rank_decay = calc_lora_rank(0.5, 1.8) # config.lora_rank_decay or calc_lora_rank(0.5, 1.8)
+        #lora_rank_decay = 32 if n_embd < 4096 else 64
+        self.time_maa_w2 = nn.Parameter(torch.empty(5, lora_rank_decay, n_embd))
+        self.time_maa_w1 = nn.Parameter(torch.empty(n_embd, lora_rank_decay*self.time_maa_w2.size(0)))
+
+        # # per-head RWKV-6
+        # H = self.num_heads
+        # self.time_decay = nn.Parameter(torch.empty(H))
+        # D_DECAY_LORA = 64 if n_embd < 4096 else 128
+        # self.time_decay_w1 = nn.Parameter(torch.empty(n_embd, D_DECAY_LORA))
+        # self.time_decay_w2 = nn.Parameter(torch.empty(D_DECAY_LORA, H))
+
+        # RWKV-6
+        self.time_decay = nn.Parameter(torch.empty(1,1,dim_att))
+        D_DECAY_LORA = 64 if n_embd < 4096 else 128
+        self.time_decay_w1 = nn.Parameter(torch.empty(n_embd, D_DECAY_LORA))
+        self.time_decay_w2 = nn.Parameter(torch.empty(D_DECAY_LORA, dim_att))
+        # self.time_faaaa = nn.Parameter(torch.empty(self.n_head, self.head_dim))
+
+        self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+
+        #self.ln_x = nn.LayerNorm(dim_att)
+
+    def reset_parameters(self):
+        print("Called reset_parameters on TMix_qwen2rwkv6 layer ", self.layer_id)
+
+        module = self
+
+        config = self.config
 
         n_layer = config.n_layer
         n_embd = self.hidden_size
@@ -431,61 +481,52 @@ class TMix_qwen2rwkv6(TMix_qwen2):
             for i in range(n_embd):
                 ddd[0, 0, i] = i / n_embd
 
-            # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            # self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
-            # self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            # self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
-            # self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # module.time_maa_x.copy_(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # module.time_maa_r.copy_(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+            # module.time_maa_k.copy_(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # module.time_maa_v.copy_(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
+            # module.time_maa_w.copy_(1.0 - torch.pow(ddd, ratio_1_to_almost0))
 
             ddd = torch.zeros(1, 1, n_embd)
-            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_g = nn.Parameter(torch.zeros_like(ddd))
+            module.time_maa_x.copy_(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            module.time_maa_r.zero_()
+            module.time_maa_k.zero_()
+            module.time_maa_v.zero_()
+            module.time_maa_w.zero_()
+            module.time_maa_g.zero_()
 
-            D_MIX_LORA = 32 if n_embd < 4096 else 64
-            self.time_maa_w2 = nn.Parameter(torch.zeros(5, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
-            self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
+            module.time_maa_w2.uniform_(-0.01, 0.01)
+            module.time_maa_w1.zero_()
 
             # # per-head RWKV-6
-            # H = self.num_heads
+            # H = module.num_heads
             # # fancy time_decay
             # decay_speed = torch.ones(H)
             # for h in range(H):
             #     decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            # self.time_decay = nn.Parameter(decay_speed)
-            # #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
-            # D_DECAY_LORA = 64 if n_embd < 4096 else 128
-            # self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            # self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
+            # module.time_decay.copy_(decay_speed)
+            # #module.time_decay.copy_(torch.empty(H).uniform_(-8, -7))
+            # module.time_decay_w1.zero_()
+            # module.time_decay_w2.uniform_(-0.01, 0.01)
 
             # RWKV-6
             decay_speed = torch.ones(dim_att)
             for n in range(dim_att):
                 decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att))
-            D_DECAY_LORA = 64 if n_embd < 4096 else 128
-            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, dim_att).uniform_(-0.01, 0.01))
+            module.time_decay.copy_(decay_speed.reshape(1,1,dim_att))
+            module.time_decay_w1.zero_()
+            module.time_decay_w2.uniform_(-0.01, 0.01)
             # tmp = torch.zeros(dim_att)
             # for n in range(dim_att):
             #     zigzag = ((n + 1) % 3 - 1) * 0.1
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
-            # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_dim))
+            # module.time_faaaa.copy_(tmp.reshape(module.n_head, module.head_dim))
 
-        self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        # start gate out with no effect
-        nn.init.zeros_(self.gate.weight)
-        #nn.init.ones_(self.gate.bias)
+            # start gate out with no effect
+            module.gate.weight.zero_()
+            #module.gate.bias.copy_(1.0)
 
-        #self.ln_x = nn.LayerNorm(dim_att)
-
-    def segsum(self, w_log): # B H L 1
-        w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
-        w_mask = torch.exp((w_log_cumsum - w_log_cumsum.mT).tril()).tril() # (B, H, L, L)
-        return w_mask
+            #module.ln_x = nn.LayerNorm(dim_att)
 
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
@@ -583,10 +624,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
     and adds RWKV specific weights for tokenshift, decay, time_first, and the final layernorm.
     """
 
-    def __init__(self, config:Transformer_Config, layer_idx):
-        super().__init__(config, layer_idx)
+    def __init__(self, config:Transformer_Config, layer_id):
+        super().__init__(config, layer_id)
         self.config = config
-        self.layer_idx = layer_idx
 
         attention_bias = True
         attention_output_bias = False
@@ -626,7 +666,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # self.x_a = nn.Parameter(torch.empty(1,1,C))
         # self.x_g = nn.Parameter(torch.empty(1,1,C))
 
-        #ratio_1_to_almost0 = 1.0 - (layer_idx / self.config.n_layer)  # 1 to ~0
+        #ratio_1_to_almost0 = 1.0 - (layer_id / self.config.n_layer)  # 1 to ~0
         #self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
         # ddd = torch.zeros(1, 1, C)
         # self.time_maa_x = nn.Parameter(torch.zeros_like(ddd))
@@ -654,7 +694,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
         self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, self.num_heads * self.qk_head_dim))
 
-        #if layer_idx > 0:
+        #if layer_id > 0:
         self.v0 = nn.Parameter(torch.empty(1,1,C))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
         self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
@@ -677,14 +717,14 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
 
     def reset_parameters(self):
-        print("Called reset_parameters on TMix_qwen2rwkv7 layer ", self.layer_idx)
+        print("Called reset_parameters on TMix_qwen2rwkv7 layer ", self.layer_id)
 
         module = self
 
         num_hidden_layers = n_layer = self.config.n_layer
         n_embd = self.hidden_size
         dim_att = self.num_heads * self.head_dim
-        layer_id = self.layer_idx
+        layer_id = self.layer_id
 
         ratio_0_to_1 = layer_id / (num_hidden_layers - 1)  # 0 to 1
         ratio_1_to_almost0 = 1.0 - (layer_id / num_hidden_layers)  # 1 to ~0
@@ -838,7 +878,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #g = torch.sigmoid(self.gate(xg))
 
         # FIXME - adding w0 twice here!!!
-        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + self.w0 + w).float()) # FIXME - we had tried 0-softplus before
+        log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w).float()) # FIXME - we had tried 0-softplus before
         #log_neglog_w = 1 - torch.nn.functional.softplus(-w)
         #log_w = -log_neglog_w.exp()
         #w = log_w.exp()
@@ -886,13 +926,15 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # k = k * (1 - w)
         #ka = k * iclr
         
-        kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
+        #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
+        kk = (k * self.k_k).view(B,T,H,-1).float()
+        kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
         #k = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         #kk = k.clone()
-        a = (1 + (a-1) * self.k_a)
+        #a = (1 + (a-1) * self.k_a)
         #k = k * (N**-0.5) * a
-        k = k * a
-        #k = k * (1 + (a-1) * self.k_a)
+        #k = k * a
+        k = k * (1 + (a-1) * self.k_a)
         ##k = k + self.k_a * a*k - self.k_a * k
 
         # if self.training:
@@ -902,7 +944,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #w = (-log_neglog_w.exp()).exp()
         #k = k * (a*w+1-w)
 
-        if self.layer_idx == 0:
+        if self.layer_id == 0:
             v_first = v
         else:
             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
@@ -913,7 +955,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
 
         x = RUN_CUDA_RWKV7g(r.to(torch.bfloat16), log_neglog_w.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), -kk.to(torch.bfloat16), (kk*a).to(torch.bfloat16), self.num_heads)
 
-        x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
+        x = F.group_norm(x.view(B * T, -1).float(), self.ln_x.num_groups, self.ln_x.weight.float(), self.ln_x.bias.float(), self.ln_x.eps).view(B, T, -1).to(x.dtype)
+        #x = self.ln_x(x.view(B * T, -1)).view(B, T, -1)
         #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
         

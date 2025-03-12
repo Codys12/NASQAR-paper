@@ -455,7 +455,7 @@ class LightningModelWrapper(pl.LightningModule):
 
         token_ids = x
         eos_token_id = 151643 # "<|endoftext|>"
-        loss_mask = token_ids != eos_token_id # shouldn't count loss of prediction from an EOS token, since it's got no information useful for predicting it!
+        #loss_mask = token_ids != eos_token_id # shouldn't count loss of prediction from an EOS token, since it's got no information useful for predicting it!
         #loss_mask = torch.ones_like(token_ids)
 
         # inverted_loss_mask = (token_ids == eos_token_id).long()
@@ -480,14 +480,14 @@ class LightningModelWrapper(pl.LightningModule):
 
             if self.config.model.hf_path == '':
                 if stage == 1:
-                    repeated_loss_mask = loss_mask.repeat(len(results.attentions), 1)
+                    #repeated_loss_mask = loss_mask.repeat(len(results.attentions), 1)
                     training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0))
-                    training_loss = training_loss * repeated_loss_mask
+                    #training_loss = training_loss * repeated_loss_mask
                     training_loss = training_loss.mean() / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
                 else: # stage == 2:
-                    repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
+                    #repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
                     training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1)
-                    training_loss = training_loss * repeated_loss_mask
+                    #training_loss = training_loss * repeated_loss_mask
                     training_loss = training_loss.mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
             reported_loss = training_loss
             logits = torch.tensor([], device=x.device)
@@ -568,7 +568,7 @@ class LightningModelWrapper(pl.LightningModule):
 
             flat_student_logits = logits.view(-1, logits.size(-1))
             flat_labels = y.view(-1)
-            flat_loss_mask = loss_mask.view(-1)
+            #flat_loss_mask = loss_mask.view(-1)
 
             reported_loss = training_loss = distillation_loss = ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
 
@@ -603,32 +603,32 @@ class LightningModelWrapper(pl.LightningModule):
                         teacher_logits = teacher_results.logits
                     flat_teacher_logits = teacher_logits.view(-1, teacher_logits.size(-1))
                 if not chunk_loss_calcs:
-                    # distillation_loss = F.kl_div(
-                    #     F.log_softmax(flat_student_logits, dim=-1),
-                    #     F.log_softmax(flat_teacher_logits, dim=-1),
-                    #     log_target=True,
-                    #     reduction='batchmean'
-                    # )
                     distillation_loss = F.kl_div(
-                        torch.log( F.softmax(flat_student_logits, dim=-1) * flat_loss_mask + 1e-8 ),
-                        F.softmax(flat_teacher_logits, dim=-1) * flat_loss_mask + 1e-8,
-                        log_target=False,
-                        reduction='sum'
+                        F.log_softmax(flat_student_logits, dim=-1),
+                        F.log_softmax(flat_teacher_logits, dim=-1),
+                        log_target=True,
+                        reduction='batchmean'
                     )
-                    distillation_loss = distillation_loss / (flat_loss_mask.sum() + 1e-8)
+                    # distillation_loss = F.kl_div(
+                    #     torch.log( F.softmax(flat_student_logits, dim=-1) * flat_loss_mask + 1e-8 ),
+                    #     F.softmax(flat_teacher_logits, dim=-1) * flat_loss_mask + 1e-8,
+                    #     log_target=False,
+                    #     reduction='sum'
+                    # )
+                    # distillation_loss = distillation_loss / (flat_loss_mask.sum() + 1e-8)
                 else:
                     # memory saving measure, because otherwise kl_div tried to allocate everything all at once
                     distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=torch.float) #flat_student_logits.dtype)
                     for c in range(0, flat_student_logits.size(0), chunk_len):
-                        chunk_loss_mask = flat_loss_mask[c:c+chunk_len].unsqueeze(-1)
-                        student_log_softmax = torch.log( F.softmax(flat_student_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask + 1e-8 )
-                        teacher_softmax = F.softmax(flat_teacher_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask + 1e-8
-                        distillation_loss = distillation_loss + F.kl_div(
-                            student_log_softmax,
-                            teacher_softmax,
-                            log_target=False,
-                            reduction='sum',
-                        )
+                        # chunk_loss_mask = flat_loss_mask[c:c+chunk_len].unsqueeze(-1)
+                        # student_log_softmax = torch.log( F.softmax(flat_student_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask + 1e-8 )
+                        # teacher_softmax = F.softmax(flat_teacher_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask + 1e-8
+                        # distillation_loss = distillation_loss + F.kl_div(
+                        #     student_log_softmax,
+                        #     teacher_softmax,
+                        #     log_target=False,
+                        #     reduction='sum',
+                        # )
                         # student_log_softmax = torch.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask
                         # teacher_log_softmax = torch.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1) * chunk_loss_mask
                         # distillation_loss = distillation_loss + F.kl_div(
@@ -637,16 +637,16 @@ class LightningModelWrapper(pl.LightningModule):
                         #     log_target=True,
                         #     reduction='sum',
                         # )
-                        # student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
-                        # teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
-                        # distillation_loss = distillation_loss + F.kl_div(
-                        #      student_log_softmax,
-                        #      teacher_log_softmax,
-                        #      log_target=True,
-                        #      reduction='sum'
-                        # )
-                    #distillation_loss = distillation_loss / flat_labels.size(0)
-                    distillation_loss = distillation_loss / (flat_loss_mask.sum() + 1e-8)
+                        student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
+                        teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                        distillation_loss = distillation_loss + F.kl_div(
+                             student_log_softmax,
+                             teacher_log_softmax,
+                             log_target=True,
+                             reduction='sum'
+                        )
+                    distillation_loss = distillation_loss / flat_labels.size(0)
+                    # distillation_loss = distillation_loss / (flat_loss_mask.sum() + 1e-8)
 
                 training_loss = distillation_loss * self.config.train.teacher.kl_weight
                 if self.config.train.teacher.ce_weight > 0:

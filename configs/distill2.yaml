@@ -1,9 +1,9 @@
 model:
-  attention_type: rwkv7_fla_chunk # rwkv7_wind_backstepping
+  attention_type: rwkv6 #rwkv7_wind_triton_bighead # rwkv7_fla_chunk # rwkv7_wind_backstepping_smallhead # 
   ctx_len: 512
 
 train:
-  proj_suffix: rwkv7-2
+  proj_suffix: rwkv6-2
   train_stage: 3
   load_partial: 1
 
@@ -49,7 +49,7 @@ train:
   num_nodes: 1
   micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
-  strategy: fsdp #deepspeed_stage_1 # ddp_find_unused_parameters_true
+  strategy: fsdp # ddp_find_unused_parameters_true # fsdp #
   grad_cp: 0
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
     
