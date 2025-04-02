@@ -61,6 +61,8 @@ if __name__ == "__main__":
             config.train.proj_name += f'_{config.model.tmix2}'
     config.runtime.proj_path = config.train.proj_dir + '/'
     config.runtime.proj_path += config.train.proj_name    
+    if config.train.proj_suffix0 != '':
+        config.runtime.proj_path += f'-{config.train.proj_suffix0}'
     if config.train.proj_suffix != '':
         config.runtime.proj_path += f'-{config.train.proj_suffix}'
     if not os.path.exists(config.runtime.proj_path):

@@ -1,9 +1,9 @@
 model:
-  attention_type: rwkv6 #rwkv7_wind_triton_bighead # rwkv7_fla_chunk # rwkv7_wind_backstepping_smallhead # 
+  #attention_type: rwkv6 #rwkv7_wind_triton_bighead # rwkv7_fla_chunk # rwkv7_wind_backstepping_smallhead # 
   ctx_len: 512
 
 train:
-  proj_suffix: rwkv6-2
+  proj_suffix: 2
   train_stage: 3
   load_partial: 1
 
@@ -22,7 +22,8 @@ train:
   # dclm-baseline-1
   # --my_exit_tokens 100627834 --magic_prime 196523 --ctx_len 512
   # --my_exit_tokens 100627834 --magic_prime 24551 --ctx_len 4096
-  # --my_exit_tokens 100627834 --magic_prime 6131 --ctx_len 15384
+  # --my_exit_tokens 100627834 --magic_prime 12281 --ctx_len 8192
+  # --my_exit_tokens 100627834 --magic_prime 6131 --ctx_len 16384
 
   # nathanctx
   # --my_exit_tokens 1565680565 --magic_prime 3057959 --ctx_len 512
@@ -49,7 +50,7 @@ train:
   num_nodes: 1
   micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
-  strategy: fsdp # ddp_find_unused_parameters_true # fsdp #
+  strategy: deepspeed_stage_1 #fsdp # ddp_find_unused_parameters_true # fsdp #
   grad_cp: 0
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
     

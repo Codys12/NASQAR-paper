@@ -13,6 +13,12 @@ class train_callback(pl.Callback):
         super().__init__()
         self.config = config
 
+    # def on_after_backward(self, trainer, pl_module):
+    #     for name,p in pl_module.named_parameters(): 
+    #         if not p.grad is None: 
+    #             print(name, p.norm().item(), p.grad.norm().item())
+    #     exit()
+
     def on_predict_start(self, trainer, pl_module) -> None:
         pl_module.load_weights()
 

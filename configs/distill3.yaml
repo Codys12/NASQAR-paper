@@ -1,11 +1,11 @@
 model:
-  attention_type: rwkv6 #rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # rwkv7_wind_backstepping_smallhead
+  #attention_type: rwkv6 #rwkv7_wind_triton_bighead #rwkv7_fla_chunk #rwkv7_wind_backstepping # rwkv7_wind_backstepping_smallhead
   ctx_len: 512
 
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: rwkv6-3
+  proj_suffix: 3
   train_stage: 3
   load_partial: 0
 
@@ -34,7 +34,7 @@ train:
   grad_cp: 1
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
 
-  epoch_save: 5
+  #epoch_save: 5
 
   attention_distillation_stage: 3
   

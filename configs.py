@@ -54,6 +54,24 @@ class Transformer_Config(Model_Config):
     alibi:Alibi_Config|None = None
     attention_type:str = ''
 
+    reinit_att:int = 0
+    gate_rank_type:int = 1
+    lora_rank_gate:int = 0
+
+    lora_rank_tokenshift:int = 0
+    lora_rank_decay:int = 0
+
+    lora_rank_iclr:int = 0
+    lora_rank_value_residual_mix:int = 0
+
+    use_pos_emb:int = 1
+
+    balance_state:int = 1
+
+    groupnorm_att:int = 1
+
+    use_tokenshift:int = 1
+
 @dataclass(kw_only=True)
 class FinchC2_Config(Transformer_Config):
     use_one_minus_w:int = 1
@@ -92,6 +110,7 @@ class Train_Config:
     wandb:str = ''
     proj_dir:str = 'out'
     proj_name:str = ''
+    proj_suffix0:str = ''
     proj_suffix:str = '0'
 
     epoch_begin:int = 0
@@ -183,6 +202,9 @@ def literal_eval(s:str):
         if not isinstance(node, Constant) or type(node.value) not in (int, float, complex):
             raise ValueError()
         return node.value
+
+    if s == "None":
+        return None
 
     # if we can convert to a constant, great
     # if not, treat it as a string

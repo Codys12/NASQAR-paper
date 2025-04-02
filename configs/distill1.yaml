@@ -1,5 +1,5 @@
 train:
-  proj_suffix: rwkv7-1
+  #proj_suffix: rwkv7-1
   train_stage: 3
   load_partial: 1
 

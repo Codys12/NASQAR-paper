@@ -49,6 +49,7 @@ config, errors = parse_cmdline_configs(sys.argv[1:], CLI_Config)
 if errors != '':
     print(errors)
     exit()
+config.train = None # to avoid clashes with training configs
 
 os.environ["RWKV_MODEL_TYPE"] = config.model.tmix
 os.environ["RWKV_CTXLEN"] = str(config.model.ctx_len)

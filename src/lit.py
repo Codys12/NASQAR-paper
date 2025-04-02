@@ -76,7 +76,7 @@ class LightningModelWrapper(pl.LightningModule):
             self.teacher.requires_grad_(False)            
 
         # FIXME - not sure how the resetted and/or loaded weights are getting transferred to the other GPUs on DS1, but it seems to be working??!
-        if self.trainer.local_rank == 0:
+        if self.trainer.global_rank == 0:
             if 'deepspeed_stage_3' not in self.config.train.strategy:
                 self.load_weights()
 
@@ -119,7 +119,7 @@ class LightningModelWrapper(pl.LightningModule):
         print("Moving model to dtype ", dtype)
         model.to(dtype=dtype)
         if 'fsdp' in self.config.train.strategy:
-            if self.trainer.local_rank == 0:
+            if self.trainer.global_rank == 0:
                 if do_reset:
                     # NOTE - we could put it on cpu here for truly huge models, but it's a LOT faster to reset parameters on GPU
                     print("Moving model to empty on", self.device)
@@ -132,7 +132,7 @@ class LightningModelWrapper(pl.LightningModule):
             print("Moving model to empty on", self.device)
             model.to_empty(device=self.device, recurse=True)
 
-        if self.trainer.local_rank == 0:
+        if self.trainer.global_rank == 0:
             # reset parameters, if needed
             if maybe_do_reset:
                 # NOTE - we do this on GPU because it's a lot faster! (even though it might not fit for truly giant models)
@@ -192,7 +192,7 @@ class LightningModelWrapper(pl.LightningModule):
             #     FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
             # ):
             save_dict = model.state_dict()
-            if self.trainer.local_rank == 0:
+            if self.trainer.global_rank == 0:
                 for k in list(save_dict.keys()):
                     if k.startswith('teacher.'):
                         del save_dict[k]
@@ -249,7 +249,7 @@ class LightningModelWrapper(pl.LightningModule):
         config = self.config
 
         if 'fsdp' in config.train.strategy:
-            if self.trainer.local_rank != 0:
+            if self.trainer.global_rank != 0:
                 return
 
         print("Loading ", ckpt_path)       
@@ -483,12 +483,12 @@ class LightningModelWrapper(pl.LightningModule):
                     #repeated_loss_mask = loss_mask.repeat(len(results.attentions), 1)
                     training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0))
                     #training_loss = training_loss * repeated_loss_mask
-                    training_loss = training_loss.mean() / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
+                    training_loss = training_loss.float().mean() / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
                 else: # stage == 2:
                     #repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
                     training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1)
                     #training_loss = training_loss * repeated_loss_mask
-                    training_loss = training_loss.mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
+                    training_loss = training_loss.float().mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
             reported_loss = training_loss
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
@@ -510,7 +510,6 @@ class LightningModelWrapper(pl.LightningModule):
                 teacher_logits = teacher_results.logits
                 flat_teacher_logits = teacher_logits.view(-1, teacher_logits.size(-1))
 
-                chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
                 chunk_len = 512
                 n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
 
@@ -572,19 +571,20 @@ class LightningModelWrapper(pl.LightningModule):
 
             reported_loss = training_loss = distillation_loss = ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
 
-            chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
+            chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3, 31, 41)
             chunk_len = 512
             n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
             if not self.training or self.teacher is None or self.config.train.teacher.ce_weight > 0:
                 if not chunk_loss_calcs:
-                    ce_loss = F.cross_entropy(flat_student_logits, flat_labels, reduction='mean') #, ignore_index=eos_token_id)
+                    ce_loss = F.cross_entropy(flat_student_logits, flat_labels) #, reduction='mean') #, ignore_index=eos_token_id)
                 else:
                     # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
                     ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=torch.float) #flat_student_logits.dtype)
                     for c in range(0, flat_student_logits.size(0), chunk_len):
-                        ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len], reduction='sum')
+                        ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len]) #, reduction='sum')
                             #ignore_index=eos_token_id, reduction='sum')
-                    ce_loss = ce_loss / flat_student_logits.size(0) 
+                    #ce_loss = ce_loss / flat_student_logits.size(0) 
+                    ce_loss = ce_loss / n_chunks
                     # / (flat_loss_mask.sum() + 1e-8) # FIXME - this isn't right to divide by this
                 reported_loss = training_loss = ce_loss
 
