@@ -79,13 +79,15 @@ if __name__ == "__main__":
         list_p = []
         for p in os.listdir(config.runtime.proj_path):
             if p.startswith("rwkv") and p.endswith(".pth"):
-                p = ((p.split("-"))[1].split("."))[0]
+                p = (p.split("-")[-1].split("."))[0]
                 if p != "final":
                     if p == "init":
-                        p = -1
+                        list_p += [-1]
                     else:
-                        p = int(p)
-                    list_p += [p]
+                        try:
+                            list_p += [int(p)]
+                        except:
+                            pass
         list_p.sort()
         if len(list_p) == 0:
             print(f"No correctly named rwkv-*.pth file found in {config.runtime.proj_path}")

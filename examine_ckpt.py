@@ -22,4 +22,4 @@ for name, p in state_dict.items():
     if p.numel() == 0:
         print(name, p.dtype, p.shape)
     else:
-        print(name, p.dtype, p.shape, float(p.min()), float(p.max()))
+        print(name, p.dtype, p.shape, float(p.std()), float(p.min()), float(p.max()))

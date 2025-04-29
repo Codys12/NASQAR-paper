@@ -28,7 +28,7 @@ if ATTENTION_TYPE == 'rwkv6':
 elif 'gla' in ATTENTION_TYPE:
     from fla.ops.gla.chunk import chunk_gla
     from fla.ops.gla.fused_recurrent import fused_recurrent_gla
-elif 'rwkv7' in ATTENTION_TYPE:
+elif 'rwkv7' in ATTENTION_TYPE or ATTENTION_TYPE == 'rwkv6_wind_backstepping_longhead':
     HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE_A"])
     CTX_LEN = int(os.environ["RWKV_CTXLEN"])
 
@@ -41,29 +41,26 @@ elif 'rwkv7' in ATTENTION_TYPE:
 
     if ATTENTION_TYPE == 'rwkv7_fla_chunk':
         from fla.ops.rwkv7.chunk import chunk_rwkv7
-        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            B,T,_ = r.shape
-            dtype = r.dtype
-            r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b) -> torch.Tensor:
             log_w = -log_neglog_w.float().exp()
             return chunk_rwkv7(r=r, w=log_w, k=k, v=v, a=a, b=b, output_final_state=False)[0].to(dtype)
     elif ATTENTION_TYPE == 'rwkv7_fla_fused_recurrent':
         from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
-        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            B,T,_ = r.shape
-            r,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [r,log_neglog_w,k,v,a,b]]
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b) -> torch.Tensor:
             log_w = -log_neglog_w.float().exp()
             return fused_recurrent_rwkv7(r, log_w, k, v, a, b, output_final_state=False)[0]
     elif ATTENTION_TYPE == 'rwkv7_wind_triton':
-        from rwkv7_attn_triton import attn_triton
-        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            B,T,C = r.shape
-            return attn_triton(r, log_neglog_w, k, v, a, b, C // num_heads)
+        from rwkv7_attn_triton import TritonRWKV7
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b) -> torch.Tensor:
+            B,T,H,C = r.shape
+            s0 = torch.zeros(B,H,C,C,dtype=r.dtype,device=r.device)
+            return TritonRWKV7.apply(log_neglog_w, r, k, v, a, b, s0, 'fp32')[0]
     elif ATTENTION_TYPE == 'rwkv7_wind_triton_bighead':
-        from rwkv7_attn_triton_bighead import attn_triton_bighead
-        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            B,T,C = r.shape
-            return attn_triton_bighead(r, log_neglog_w, k, v, a, b, C // num_heads)
+        from rwkv7_attn_triton_bighead import TritonRWKV7
+        def RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, a, b) -> torch.Tensor:
+            B,T,H,C = r.shape
+            s0 = torch.zeros(B,H,C,C,dtype=r.dtype,device=r.device)
+            return TritonRWKV7.apply(log_neglog_w, r, k, v, a, b, s0, 'fp32')[0]
     elif ATTENTION_TYPE in ('rwkv7_wind_cuda', 'rwkv7_wind_cuda_full'):
         CHUNK_LEN = 16
 
@@ -107,21 +104,107 @@ elif 'rwkv7' in ATTENTION_TYPE:
                 torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
                 return dw,dq,dk,dv,da,db
 
-        def RUN_CUDA_RWKV7g(q,w,k,v,a,b,num_heads:int) -> torch.Tensor:
-            B,T,_ = q.shape
-            q,w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,w,k,v,a,b]]
+        def RUN_CUDA_RWKV7g(q,w,k,v,a,b) -> torch.Tensor:
+            B,T,H,N = q.shape
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,-1)
             
-    elif ATTENTION_TYPE in ['rwkv7_wind_backstepping', 'rwkv7_wind_backstepping_smallhead', 'rwkv7_wind_backstepping_bighead']:
-        CHUNK_LEN = 16
+    elif ATTENTION_TYPE in ['rwkv6_wind_backstepping_longhead', 'rwkv7_wind_backstepping_longhead', 'rwkv7_wind_singlestepping_longhead', 'rwkv7_wind_replaystepping_longhead']:
+        if ATTENTION_TYPE == 'rwkv7_wind_singlestepping_longhead':
+            CHUNK_LEN = 1
+        else:
+            CHUNK_LEN = 16
+
+        batchsz_times_heads_estimate = 8*64
+        head_size = HEAD_SIZE
+
+        device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if 'AMD' in device_props.name:
+            value_chunk_size = 16
+        else:
+            value_chunk_size = 64
+            if torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count >= batchsz_times_heads_estimate * head_size / 32:
+                value_chunk_size = 32
 
         flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
         if torch.cuda.is_available():
             if torch.version.hip:
-                flags += ["--save-temps"]
+                flags += ["--save-temps", '-ffast-math', '-DAMD']
             else:
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
+        flags += [f'-D_K_={value_chunk_size}']
+        sources = [f'rwkv_cuda_wind/{ATTENTION_TYPE[11:]}.cu', f'rwkv_cuda_wind/{ATTENTION_TYPE[11:]}.cpp']
+
+        load(name=ATTENTION_TYPE[6:], sources=sources, is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        if ATTENTION_TYPE in ['rwkv6_wind_backstepping_longhead', 'rwkv7_wind_backstepping_longhead']:
+            op = torch.ops.wind_backstepping_longhead
+            assert hasattr(op, 'forward'), 'Requires a load kernel from load_backstepping(head_size)'
+        elif ATTENTION_TYPE == 'rwkv7_wind_singlestepping_longhead':
+            op = torch.ops.wind_singlestepping_longhead
+            assert hasattr(op, 'forward'), 'Requires a load kernel from load_singlestepping(head_size)'
+        elif ATTENTION_TYPE == 'rwkv7_wind_replaystepping_longhead':
+            op = torch.ops.wind_replaystepping_longhead
+            assert hasattr(op, 'forward'), 'Requires a load kernel from load_replaystepping(head_size)'
+
+        class RWKV7_longhead(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, q,w,k,v,a,b,s0):
+                B,T,H,C = w.shape
+                assert T%CHUNK_LEN == 0
+                if not torch.compiler.is_compiling():
+                    #assert hasattr(op, 'forward'), 'Requires a load kernel from load_replaystepping(head_size)'
+                    assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,a,b,s0])
+                    w,q,k,v,a,b,s0 = [i.contiguous() for i in [w,q,k,v,a,b,s0]]
+                    #assert all(i.is_contiguous() for i in [w,q,k,v,a,b,s0])
+                    assert all(i.shape == w.shape for i in [w,q,k,v,a,b])
+                    assert list(s0.shape) == [B,H,C,C]
+                B,T,H,C = w.shape
+                y = torch.empty_like(v)
+                sT = torch.empty_like(s0)
+                if any(i.requires_grad for i in [w,q,k,v,a,b,s0]):
+                    s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
+                    sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
+                else:
+                    s = sa = None
+                op.forward(w,q,k,v,a,b, s0,y,s,sa,sT)
+                ctx.save_for_backward(w,q,k,v,a,b,s,sa)
+                return y, sT
+            @staticmethod
+            def backward(ctx, dy, dsT):
+                w,q,k,v,a,b,s,sa = ctx.saved_tensors
+                B,T,H,C = w.shape
+                if not torch.compiler.is_compiling():
+                    assert all(i.dtype==torch.bfloat16 for i in [dy,dsT])
+                    assert all(i.is_contiguous() for i in [dy,dsT])
+
+                dv,ds0 = [torch.empty_like(x) for x in [v,dsT]]
+                dw,dq,dk,da,db = [torch.zeros(B,T,H,C, device=w.device) for i in range(5)]
+                op.backward(w,q,k,v,a,b, dy,s,sa,dsT, dw,dq,dk,dv,da,db,ds0)
+                return dq,dw,dk,dv,da,db,ds0
+            
+        def RUN_CUDA_RWKV7g(q,log_neglog_w,k,v,a=None,b=None,s0=None) -> torch.Tensor:
+            B,T,H,N = q.shape
+            if a is None: a = torch.zeros(B,T,H,HEAD_SIZE, dtype=torch.bfloat16, device=log_neglog_w.device)
+            if b is None: b = torch.zeros(B,T,H,HEAD_SIZE, dtype=torch.bfloat16, device=log_neglog_w.device)
+            if s0 is None: s0 = torch.zeros(B,H,HEAD_SIZE,HEAD_SIZE, dtype=torch.bfloat16,device=log_neglog_w.device)
+            return RWKV7_longhead.apply(q,log_neglog_w,k,v,a,b,s0)[0].view(B,T,-1)
+                    
+    elif ATTENTION_TYPE in ['rwkv7_wind_backstepping', 'rwkv7_wind_backstepping_smallhead', 'rwkv7_wind_backstepping_bighead']:
+        CHUNK_LEN = 16
+
+        batchsz_times_heads_estimate = 8*64
+        head_size = HEAD_SIZE
+
+        flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
+        if torch.cuda.is_available():
+            if torch.version.hip:
+                flags += ["--save-temps", '-ffast-math', '-DAMD']
+            else:
+                flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
+
+        #if ATTENTION_TYPE == 'rwkv7_wind_backstepping_full':
+        #    sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu']
+        #else:
         if ATTENTION_TYPE == 'rwkv7_wind_backstepping_smallhead':
             VERSION = 1
         elif ATTENTION_TYPE == 'rwkv7_wind_backstepping_bighead':
@@ -129,9 +212,6 @@ elif 'rwkv7' in ATTENTION_TYPE:
         else:
             VERSION = 1 if HEAD_SIZE < 128 else 2
 
-        #if ATTENTION_TYPE == 'rwkv7_wind_backstepping_full':
-        #    sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu']
-        #else:
         sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}.cu', f'rwkv_cuda_wind/backstepping_f32_cpp.cu']
 
         #load(name="wind_backstepping", sources=[f'rwkv_cuda_wind/backstepping_f32_{VERSION}_full.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
@@ -144,6 +224,7 @@ elif 'rwkv7' in ATTENTION_TYPE:
                 B,T,H,C = w.shape 
                 assert T%CHUNK_LEN == 0
                 assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
+                assert all(i.shape == w.shape for i in [w,q,k,v,z,b])
                 w,q,k,v,z,b = [i.contiguous() for i in [w,q,k,v,z,b]]
                 y = torch.empty_like(v)
                 s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
@@ -160,9 +241,8 @@ elif 'rwkv7' in ATTENTION_TYPE:
                 torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
                 return dw,dq,dk,dv,dz,db
 
-        def RUN_CUDA_RWKV7g(q,log_neglog_w,k,v,a,b,num_heads:int) -> torch.Tensor:
-            B,T,HC = q.shape
-            q,log_neglog_w,k,v,a,b = [i.view(B,T,num_heads,-1) for i in [q,log_neglog_w,k,v,a,b]]
+        def RUN_CUDA_RWKV7g(q,log_neglog_w,k,v,a,b) -> torch.Tensor:
+            B,T,H,N = q.shape
             return WindBackstepping.apply(log_neglog_w,q,k,v,a,b).view(B,T,-1)
     elif ATTENTION_TYPE == 'rwkv7_cuda':
         DTYPE = torch.bfloat16
@@ -180,11 +260,10 @@ elif 'rwkv7' in ATTENTION_TYPE:
         load(name="wkv7g", sources=["cuda/wkv7g_op.cpp", f"cuda/wkv7g_v1.cu"], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
         class WKV_7g(torch.autograd.Function):
             @staticmethod
-            def forward(ctx, r, w, k, v, a, b, num_heads:int):
+            def forward(ctx, r, w, k, v, a, b):
                 with torch.no_grad():
-                    B, T, V = v.size()
-                    B, T, R = r.size()
-                    H = num_heads
+                    B, T, H, V = v.size()
+                    B, T, H, R = r.size()
                     #N = C // H
                     A = T // CHUNK_LEN
                     #assert N == C // H
@@ -196,12 +275,10 @@ elif 'rwkv7' in ATTENTION_TYPE:
                     ctx.R = R
                     ctx.V = V
                     ctx.H = H
-                    ctx.NR = R // H
-                    ctx.NV = V // H
                     y = torch.empty((B, T, V), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    saa = torch.empty((B, T, H, NR), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    sss = torch.empty((B, H, A, NR, NR), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    torch.ops.wkv7g.forward(B, T, C, H, r, w, k, v, a, b, y, saa, sss)
+                    saa = torch.empty((B, T, H, R), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    sss = torch.empty((B, H, A, R, R), device=k.device, dtype=torch.float, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
+                    torch.ops.wkv7g.forward(B, T, V*H, H, r, w, k, v, a, b, y, saa, sss)
                     ctx.save_for_backward(r, w, k, v, a, b, saa, sss)
                     return y
             @staticmethod
@@ -212,8 +289,6 @@ elif 'rwkv7' in ATTENTION_TYPE:
                     R = ctx.R
                     V = ctx.V
                     H = ctx.H
-                    NR = ctx.NR
-                    NV = ctx.NV
                     A = T // CHUNK_LEN
                     assert gy.dtype == DTYPE
                     gy = gy.contiguous()
@@ -225,13 +300,13 @@ elif 'rwkv7' in ATTENTION_TYPE:
                     ga = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     gb = torch.empty((B, T, R), device=gy.device, requires_grad=False, dtype=DTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
                     zzz = torch.empty((B, H, A-1, N, N), device=gy.device, dtype=XTYPE, memory_format=torch.contiguous_format)#.uniform_(-100, 100)
-                    torch.ops.wkv7g.backward(B, T, V, H, r, w, k, v, a, b, saa, sss, zzz, gy, gr, gw, gk, gv, ga, gb)
+                    torch.ops.wkv7g.backward(B, T, V*H, H, r, w, k, v, a, b, saa, sss, zzz, gy, gr, gw, gk, gv, ga, gb)
                     del saa
                     del sss
                     del zzz
                     return (gr, gw, gk, gv, ga, gb)
-        def RUN_CUDA_RWKV7g(r, w, k, v, a, b, num_heads:int) -> torch.Tensor:
-            return WKV_7g.apply(r, w, k, v, a, b, num_heads)  
+        def RUN_CUDA_RWKV7g(r, w, k, v, a, b) -> torch.Tensor:
+            return WKV_7g.apply(r, w, k, v, a, b)  
     else:
         assert False, 'bad attention type specified'
 else:
@@ -656,9 +731,16 @@ class TMix_qwen2rwkv6(TMix_qwen2):
             #    attn_output = None # FIXME            
             #attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
             #attn_output = chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
-            attn_output = fused_recurrent_gla(query_states, key_states, value_states, decay_states_log)[0]
-            attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+            if ATTENTION_TYPE == 'gla':
+                attn_output = fused_recurrent_gla(query_states, key_states, value_states, decay_states_log)[0]
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+            elif ATTENTION_TYPE == 'rwkv6_wind_backstepping_longhead':
+                query_states,log_neglog_w,key_states,value_states = [i.transpose(1,2).to(torch.bfloat16) for i in [query_states,log_neglog_w,key_states,value_states]]
+                attn_output = RUN_CUDA_RWKV7g(query_states, log_neglog_w, key_states, value_states)
+                attn_output = attn_output * key_states.shape[-1] ** -0.5
+            else:
+                assert False, 'bad attention type'
             if self.config.groupnorm_att:
                 attn_output = self.ln_x(attn_output.view(bsz * q_len, -1)).view(bsz, q_len, -1)
             if self.config.gate_rank_type != 0:
@@ -927,11 +1009,6 @@ class TMix_qwen2rwkv7(TMix_qwen2):
 
         # FIXME - adding w0 twice here!!!
         log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w).float()) # FIXME - we had tried 0-softplus before
-        #log_neglog_w = 1 - torch.nn.functional.softplus(-w)
-        #log_w = -log_neglog_w.exp()
-        #w = log_w.exp()
-        #w = 1.0 - 0.94 * F.sigmoid(w_base.float())
-        #log_w = w_base.log()
 
         if self.config.use_pos_emb:
             r = r.view(B,T,-1,N)
@@ -943,73 +1020,48 @@ class TMix_qwen2rwkv7(TMix_qwen2):
             r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
             k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
-        #r = self.receptance(r)
-        #k = self.key(k)
-
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
 
-        # k = k + dk
-        # v = v + dv
-
-        #r = r + torch.tanh(r @ self.q1) @ self.q2
-        #k = k + torch.tanh(k @ self.k1) @ self.k2
-
-        #wclamp = -F.softplus(-w_base+0.54) + 1
-        #log_neglog_w = wclamp
-        #w = torch.exp(-torch.exp(wclamp))
-
-        # kk_delta = torch.tanh(xk @ self.kk1) @ self.kk2
-
-        # # TODO: consider lora replacement of xw by xk and remove one lora from ddlerp?
-        # kk = (k + kk_delta).view(B, T, H, -1)
-        # kk = kk / (kk.norm(dim=-1, keepdim=True) + 1e-7)
-        # kk = kk.view(B, T, -1)
-        # kka = kk * iclr
-        
-        # k = k * (1 - w)
-        #ka = k * iclr
-        
+        # k = k.view(B,T,H,-1).float()
+        # k = (k / (torch.norm(k, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+        # kk = k
         #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        kk = (k * self.k_k).view(B,T,H,-1).float()
+        #kk = (k * self.k_k).view(B,T,H,-1).float()
+        kk = (k).view(B,T,H,-1).float()
         kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-        #k = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        #kk = k.clone()
-        #a = (1 + (a-1) * self.k_a)
-        #k = k * (N**-0.5) * a
-        #k = k * a
-        k = k * (1 + (a-1) * self.k_a)
-        ##k = k + self.k_a * a*k - self.k_a * k
-
-        # if self.training:
-        #     log_neglog_w[reset_mask] = 1.0
-        #     kk[reset_mask] = 0.0
-
-        #w = (-log_neglog_w.exp()).exp()
-        #k = k * (a*w+1-w)
+        #k = k * (1 + (a-1) * self.k_a)
 
         if self.layer_id == 0:
             v_first = v
         else:
             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
 
-        # FIXME - do we still need something like the code below?
-        #mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
-        #k = k * torch.clamp(log_neglog_w*mk, max=0).exp()
-
-        x = RUN_CUDA_RWKV7g(r.to(torch.bfloat16), log_neglog_w.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), -kk.to(torch.bfloat16), (kk*a).to(torch.bfloat16), self.num_heads)
+        z = -kk
+        b = kk*a
+        #z = b = torch.zeros_like(k)
+        w = (-log_neglog_w.exp()).exp()
+        # s'^T = ws^T-as^Tkk^T+avk^T, and I assume k is normalized
+        # the left part removes 1-w 'values'  via multiplication
+        # the middle part removes a 'values'
+        # the right part adds back in a new 'values'
+        # so the total amount removed is 1-w+a 'values', but the amount added is a
+        # to compensate, we need to somehow adjust a on the right side to become 1-w+a
+        # leaving us with the revised recurrence formula:
+        # s'^T = ws^T-as^Tkk^T+(1-w+a)vk^T, and I assume k is normalized
+        if self.config.balance_state:
+            k = k * (1-w+a)
+        r,log_neglog_w,k,v,z,b = [i.to(torch.bfloat16).view(B,T,H,-1) for i in [r,log_neglog_w,k,v,z,b]]
+        x = RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, z, b)
 
         if self.config.groupnorm_att:
             x = F.group_norm(x.view(B * T, -1).float(), self.ln_x.num_groups, self.ln_x.weight.float(), self.ln_x.bias.float(), self.ln_x.eps).view(B, T, -1).to(x.dtype)
-        #x = self.ln_x(x.view(B * T, -1)).view(B, T, -1)
-        #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
+        else:
+            x = x * N ** -0.5
         if self.config.gate_rank_type != 0:
             x = x * g
         x = self.o_proj(x)
-        
-        # if self.training:
-        #     x[reset_mask] = 0.0
 
         if input_seq_len != T:
             x = x[:, :input_seq_len]
@@ -1320,12 +1372,16 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         lr_decay = set()
         lr_1x = set()
         lr_fp32 = set()
+        lr_2 = set()
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
             # if 'lm_head' in n or 'embed_tokens' in n:
             #     lr_fp32.add(n)
             #     continue
+            if '.self_attn.' in n:
+                lr_2.add(n)
+                continue
             # NOTE - this check is no good in FSDP because the tensors end up with some stupid fake shape
             #if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
             if train_config.weight_decay > 0 and '.bias' not in n and 'norm' not in n and 'ln' not in n:
@@ -1341,10 +1397,12 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         lr_decay = sorted(list(lr_decay))
         lr_1x = sorted(list(lr_1x))
         lr_fp32 = sorted(list(lr_fp32))
+        lr_2 = sorted(list(lr_2))
         
         print('1x', len(lr_1x), '\n')
         print('decay', len(lr_decay), '\n')
         print('fp32', len(lr_fp32), '\n')
+        print('high', len(lr_2), '\n')
         
         optim_groups = [
             {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
@@ -1352,6 +1410,8 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         if len(lr_fp32) > 0:
             # FIXME - NOTE THIS VERY LOW LR SCALE!!!
             optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.5, 'name':'lr_fp32'}]
+        if len(lr_2) > 0:
+            optim_groups += [{"params": [param_dict[n] for n in lr_2], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_2'}]
         if len(lr_decay) > 0:
             optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
 

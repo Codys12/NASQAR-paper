@@ -7,6 +7,7 @@ from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
 from configs import TrainerCLI_Config
 
 from src.logger import print0 as print
+import deepspeed.utils
 
 class train_callback(pl.Callback):
     def __init__(self, config:TrainerCLI_Config):
@@ -14,10 +15,14 @@ class train_callback(pl.Callback):
         self.config = config
 
     # def on_after_backward(self, trainer, pl_module):
+    #     will_exit = False
     #     for name,p in pl_module.named_parameters(): 
-    #         if not p.grad is None: 
-    #             print(name, p.norm().item(), p.grad.norm().item())
-    #     exit()
+    #         grad = deepspeed.utils.safe_get_full_grad(p)
+    #         if not grad is None: 
+    #             will_exit = True
+    #             print(name, p.norm().item(), grad.norm().item())
+    #     if will_exit:
+    #         exit()
 
     def on_predict_start(self, trainer, pl_module) -> None:
         pl_module.load_weights()
@@ -35,24 +40,29 @@ class train_callback(pl.Callback):
         # LR schedule
         if config.runtime.epoch_count == 0 or config.train.my_exit_tokens == 0:
             lr = config.train.lr_init
+            lr2 = config.train.lr2_init
         else:
             lr_progress = pl_module.get_lr_progress()
 
-            match config.train.lr_decay_type:
-                case 'linear':
-                    init_amt = 1.0 - lr_progress
-                    lr = config.train.lr_final + (config.train.lr_init - config.train.lr_final) * init_amt
-                case 'exp':
-                    lr = config.train.lr_init * math.exp(math.log(config.train.lr_final / config.train.lr_init) * lr_progress)
-                case 'cos':
-                    init_amt = math.cos(math.pi / 2 * lr_progress)
-                    lr = config.train.lr_final + (config.train.lr_init - config.train.lr_final) * init_amt
-                case 'oneminussqrt':
-                    init_amt = 1.0 - math.sqrt(lr_progress)
-                    lr = config.train.lr_final + (config.train.lr_init - config.train.lr_final) * init_amt
-                case _:
-                    print("bad lr_decay_type specified")
-                    exit()
+            def calc_lr(lr_decay_type,lr_progress, lr_init, lr_final):
+                match lr_decay_type:
+                    case 'linear':
+                        init_amt = 1.0 - lr_progress
+                        return lr_final + (lr_init - lr_final) * init_amt
+                    case 'exp':
+                        return lr_init * math.exp(math.log(lr_final / lr_init) * lr_progress)
+                    case 'cos':
+                        init_amt = math.cos(math.pi / 2 * lr_progress)
+                        return lr_final + (lr_init - lr_final) * init_amt
+                    case 'oneminussqrt':
+                        init_amt = 1.0 - math.sqrt(lr_progress)
+                        return lr_final + (lr_init - lr_final) * init_amt
+                    case _:
+                        print("bad lr_decay_type specified")
+                        exit()
+            
+            lr = calc_lr(config.train.lr_decay_type, lr_progress, config.train.lr_init, config.train.lr_final)
+            lr2 = calc_lr(config.train.lr_decay_type, lr_progress, config.train.lr_init if config.train.lr2_init<0 else config.train.lr2_init, config.train.lr_final if config.train.lr2_final<0 else config.train.lr2_final)
 
             real_progress = pl_module.get_real_progress()
             if real_progress >= 1:
@@ -63,6 +73,7 @@ class train_callback(pl.Callback):
         if trainer.global_step < config.train.warmup_steps:
             #lr = lr * (0.2 + 0.8 * trainer.global_step / config.train.warmup_steps)
             lr = lr * (0.01 + .99 * trainer.global_step / config.train.warmup_steps)
+            lr2 = lr2 * (0.01 + .99 * trainer.global_step / config.train.warmup_steps)
 
         if config.train.weight_decay_final > 0:
             wd_now = config.train.weight_decay * math.exp(math.log(config.train.weight_decay_final / config.train.weight_decay) * lr_progress)
@@ -73,12 +84,16 @@ class train_callback(pl.Callback):
             if param_group["weight_decay"] > 0:
                 param_group["weight_decay"] = wd_now
             if config.train.layerwise_lr > 0:
-                param_group["lr"] = lr * param_group["my_lr_scale"]
+                if param_group["name"] == "lr_2":
+                    param_group["lr"] = lr2 * param_group["my_lr_scale"]
+                else:
+                    param_group["lr"] = lr * param_group["my_lr_scale"]
                 # print(param_group["lr"], param_group["my_lr_scale"])
             else:
                 param_group["lr"] = lr
 
         trainer.my_lr = lr
+        trainer.my_lr2 = lr2
         trainer.my_wd = wd_now
         # rank_zero_info(f"{real_global_step} {lr}")
 
@@ -128,6 +143,7 @@ class train_callback(pl.Callback):
             trainer.my_loss_count += 1
             trainer.my_epoch_loss = trainer.my_loss_sum / trainer.my_loss_count
             self.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
+            self.log("lr2", trainer.my_lr2, prog_bar=True, on_step=True)
             # self.log("s", real_global_step, prog_bar=True, on_step=True)
 
             # if len(config.train.wandb) > 0:

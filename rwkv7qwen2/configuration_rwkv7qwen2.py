@@ -165,6 +165,10 @@ class RWKV7Qwen2Config(PretrainedConfig):
         attention_dropout=0.0,
         attention_bias=True,
         attention_output_bias=False,
+        gate_rank_type=2,
+        balance_state=True,
+        groupnorm_att=False,
+        use_tokenshift=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -203,6 +207,10 @@ class RWKV7Qwen2Config(PretrainedConfig):
 
         self.attention_bias = attention_bias
         self.attention_output_bias = attention_output_bias
+        self.gate_rank_type = gate_rank_type
+        self.balance_state = balance_state
+        self.groupnorm_att = groupnorm_att
+        self.use_tokenshift = use_tokenshift
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

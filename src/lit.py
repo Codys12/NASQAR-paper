@@ -679,12 +679,13 @@ class LightningModelWrapper(pl.LightningModule):
         return progress
     def get_lr_progress(self):
         config = self.config
-        wait_tokens = int(config.train.lr_wait * abs(config.train.my_exit_tokens))
         warmup_tokens = config.train.warmup_steps * config.model.ctx_len * config.runtime.global_step_bsz
-        token_offset = warmup_tokens + wait_tokens
-        progress = (self.get_real_tokens() - token_offset) / (abs(config.train.my_exit_tokens) - token_offset)
-        progress = max(0, min(1, progress))
-        return progress
+        tokens_ex_warmup = abs(config.train.my_exit_tokens) - warmup_tokens
+        real_progress_ex_warmup = (self.get_real_tokens() - warmup_tokens) / tokens_ex_warmup
+        real_progress_ex_warmup = max(0, min(1, real_progress_ex_warmup))
+        lr_progress = (real_progress_ex_warmup - config.train.lr_wait) / (config.train.lr_endpoint - config.train.lr_wait)
+        lr_progress = max(0, min(1, lr_progress))
+        return lr_progress
 
 
     def training_step(self, batch, batch_idx):

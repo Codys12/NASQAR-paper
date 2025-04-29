@@ -373,14 +373,18 @@ class RWKV7Attention(nn.Module):
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
         self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
 
-        self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
-        self.g2 = nn.Parameter(torch.empty(lora_rank_gate, C))
+        if config.gate_rank_type == 1:
+            self.gate = nn.Linear(C, C, bias=False)
+        elif config.gate_rank_type == 2:
+            self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
+            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, C))
 
         self.k_k = nn.Parameter(torch.empty(1,1,C))
         self.k_a = nn.Parameter(torch.empty(1,1,C))
         self.r_k = nn.Parameter(torch.empty(H,N))
 
-        self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
+        if self.config.groupnorm_att:
+            self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
 
     def forward(
         self,
@@ -436,7 +440,10 @@ class RWKV7Attention(nn.Module):
         k = self.k_proj(xk)
         v = self.v_proj(xv)
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
-        g = torch.sigmoid(xg @ self.g1) @ self.g2
+        if self.config.gate_rank_type == 1:
+            g = torch.sigmoid(self.gate(xg))
+        elif self.config.gate_rank_type == 2:
+            g = torch.sigmoid(xg @ self.g1) @ self.g2
         
         if position_embeddings is not None:
             r = r.view(B,T,-1,N)
@@ -454,16 +461,19 @@ class RWKV7Attention(nn.Module):
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
+        use_alt = True
+
         #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         #kk = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         #kk = k.view(B,T,H,-1)
         #kk = (kk.float() / (torch.norm(kk.float(), dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
 
-        kk = (k * self.k_k).view(B,T,H,-1).float()
-        kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-
-        #kk = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0, eps=self.head_dim*1e-5).view(B,T,-1)
-        k = k * (1 + (a-1) * self.k_a)
+        if use_alt:
+            kk = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0, eps=self.head_dim*1e-5).view(B,T,-1)
+        else:
+            kk = (k * self.k_k).view(B,T,H,-1).float()
+            kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+            k = k * (1 + (a-1) * self.k_a)
         # a = 1 + (a-1) * self.k_a
         # k = k * a
         if self.layer_idx == 0: v_first = v
@@ -473,7 +483,6 @@ class RWKV7Attention(nn.Module):
         if attention_mask is not None:
             v = v * attention_mask[:, -v.shape[-2]:, None]
             
-        xx = x
         # if T == 1 or not self.training:
         #     w = torch.exp(-0.606531 * torch.sigmoid(w_lora_result)) # 0.606531 = exp(-0.5)
         #     output_vk_state = input_vk_state
@@ -482,7 +491,7 @@ class RWKV7Attention(nn.Module):
         #         vk = v_.view(B,H,N,1) @ k_.view(B,H,1,N)
         #         ab = (-kk_).view(B,H,N,1) @ (kk_*a_).view(B,H,1,N)
         #         output_vk_state = output_vk_state * w_.view(B,H,1,N) + output_vk_state @ ab.float() + vk.float()
-        #         xx[:,t] = (output_vk_state.to(dtype=x.dtype) @ r_.view(B,H,N,1)).view(B,H*N)
+        #         x[:,t] = (output_vk_state.to(dtype=x.dtype) @ r_.view(B,H,N,1)).view(B,H*N)
         #     # FIXME - support fast triton kernel for non-training pre-fill with state in and out
         # else:
         # FIXME - can simplify to 
@@ -490,24 +499,30 @@ class RWKV7Attention(nn.Module):
         log_neglog_w = - 0.5 - torch.nn.functional.softplus(-w_lora_result)
         log_w = -log_neglog_w.float().exp()
 
-        # w = (-log_neglog_w.exp()).exp()
-        # k = kk * (a*w+1-w)
+        #if use_alt:
+        if self.config.balance_state:
+            w = log_w.exp()
+            k = k * (1-w+a)
+            #k = kk * (a*w+1-w)
 
         r,log_w,k,v,kk,a = [i.view(B,T,self.num_heads,-1) for i in [r,log_w,k,v,kk,a]]
         if self.training:
-            xx, output_vk_state = chunk_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
+            x, output_vk_state = chunk_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
         else:
-            xx, output_vk_state = fused_recurrent_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
+            x, output_vk_state = fused_recurrent_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
 
-        xx = torch.nn.functional.group_norm(xx.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(xx.dtype)
-        # xx = xx + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
-        xx = self.o_proj(xx * g)
+        if self.config.groupnorm_att:
+            x = torch.nn.functional.group_norm(x.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(x.dtype)
+        else:
+            x = x.view(B,T,H*N).to(x.dtype) * N ** -0.5
+        # x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
+        x = self.o_proj(x * g)
 
         output_final_state = not self.training and use_cache and past_key_values is not None
         if output_final_state:
             past_key_values.update(output_vk_state, output_shift_state, q_len, self.layer_idx)
 
-        return xx, v_first
+        return x, v_first
     
 class RWKV7Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: RWKV7Qwen2Config, layer_idx: int):

@@ -363,10 +363,7 @@ def tl_dot(prec:tl.constexpr, a, b):
     else:
         tl.static_assert(False)
 
-def attn_triton_bighead(r,w,k,v,a,b, HEAD_SIZE, dot_prec = 'fp32'):
-    B,T,HC = w.shape
-    C = HEAD_SIZE
-    H = HC//C
-    r,w,k,v,a,b = [i.view(B,T,H,C) for i in [r,w,k,v,a,b]]
-    s0 = th.zeros(B,H,C,C, dtype=th.bfloat16,device=w.device)
-    return TritonRWKV7.apply(w,r,k,v,a,b,s0,dot_prec)[0].view(B,T,HC)
+# def attn_triton_bighead(r,w,k,v,a,b, dot_prec = 'fp32'):
+#     B,T,H,C = w.shape
+#     s0 = th.zeros(B,H,C,C, dtype=th.bfloat16,device=w.device)
+#     return TritonRWKV7.apply(w,r,k,v,a,b,s0,dot_prec)
