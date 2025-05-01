@@ -409,7 +409,7 @@ class TMix_qwen3(nn.Module):
         # self.is_causal = True
         # self.attention_dropout = config.attention_dropout
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
+        if self.hidden_size % self.num_heads != 0:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
@@ -485,7 +485,7 @@ class TMix_qwen3(nn.Module):
             attn_weights = torch.empty(0, device=x.device)
 
         y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
-        y = y.transpose(1,2).reshape(B,L,D)
+        y = y.transpose(1,2).reshape(B,L,-1)
         y = self.o_proj(y)
         return y, v_first, TimeMixState(wkv_state, last_state.shift_state), attn_weights
 
@@ -564,7 +564,7 @@ class TMix_qwen3rwkv6(TMix_qwen3):
         elif config.gate_rank_type == 2:
             lora_rank_gate = config.lora_rank_gate or calc_lora_rank(0.8, 0.6)
             self.g1 = nn.Parameter(torch.empty(n_embd, lora_rank_gate))
-            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, n_embd))
+            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, self.num_heads * self.head_dim))
 
         if config.groupnorm_att:
             self.ln_x = nn.GroupNorm(self.num_heads, dim_att, eps=self.head_dim * 1e-5)
@@ -778,7 +778,7 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         C = self.hidden_size = config.n_embd
         N = self.head_dim = config.head_size
         self.qk_head_dim = self.head_dim
-        H = self.num_heads = C // N
+        H = self.num_heads
         attention_hidden_size = H * N
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
@@ -839,15 +839,15 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, self.num_heads * self.qk_head_dim))
 
         #if layer_id > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,C))
+        self.v0 = nn.Parameter(torch.empty(1,1,H*N))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
-        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, H*N))
 
         if config.gate_rank_type == 1:
             self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         elif config.gate_rank_type == 2:
             self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
-            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, C))            
+            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, self.num_heads * self.head_dim))
 
         #self.kk1 = nn.Parameter(torch.empty(C, lora_rank_deformed_key))
         #self.kk2 = nn.Parameter(torch.empty(lora_rank_deformed_key, C))
