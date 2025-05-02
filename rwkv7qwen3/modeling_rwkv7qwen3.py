@@ -304,13 +304,13 @@ class RWKV7Attention(nn.Module):
         # self.x_a = nn.Parameter(torch.empty(1,1,C))
         # self.x_g = nn.Parameter(torch.empty(1,1,C))
 
-        self.w0 = nn.Parameter(torch.empty(1,1,C))
+        self.w0 = nn.Parameter(torch.empty(1,1,H*N))
         self.w1 = nn.Parameter(torch.empty(C, lora_rank_decay))
-        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, C))
+        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, H*N))
 
-        self.a0 = nn.Parameter(torch.empty(1,1,C))
+        self.a0 = nn.Parameter(torch.empty(1,1,H*N))
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
-        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, C))
+        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, H*N))
 
         #if layer_idx > 0:
         self.v0 = nn.Parameter(torch.empty(1,1,H*N))
