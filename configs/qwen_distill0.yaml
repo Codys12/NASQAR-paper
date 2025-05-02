@@ -16,7 +16,7 @@ model:
 
 train:
   proj_name: qwen2-0B5
-  proj_suffix: 1
+  proj_suffix: 0
   train_stage: 3
   #load_model: out/qwen2-0B5-1/rwkv-init.pth
   load_model: out/qwen2-0B5.safetensors

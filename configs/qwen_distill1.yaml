@@ -16,7 +16,7 @@ model:
 
 train:
   proj_name: qwen2-0B5
-  proj_suffix: 2
+  proj_suffix: 1
   train_stage: 3
   #load_model: out/qwen2-0B5.safetensors
   #load_partial: 1

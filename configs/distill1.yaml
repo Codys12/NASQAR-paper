@@ -2,7 +2,7 @@ model:
   ctx_len: 512
 
 train:
-  proj_suffix: 2
+  proj_suffix: 1
   train_stage: 3
   load_partial: 1
 
