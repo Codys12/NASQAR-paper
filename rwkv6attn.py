@@ -223,7 +223,7 @@ class AttentionDistillationWrapper(nn.Module):
         super().__init__()
         self.teacher_attn = original_self_attn
         self.student_attn = ReplacementSelfAttentionType(model_config, original_self_attn.layer_idx)
-        assert attention_distillation_stage == 2
+        assert attention_distillation_stage == 1
         self.attention_distillation_stage = attention_distillation_stage
 
         # copy in teacher's starting parameter values into student during stage 2
@@ -246,14 +246,14 @@ class AttentionDistillationWrapper(nn.Module):
         *args,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        #if self.attention_distillation_stage == 2:
+        #if self.attention_distillation_stage == 1:
         # even though we must return our special loss in as 'attentions', we don't need to obtain the actual attentions from the model for stage 2, only stage 1
         kwargs['output_attentions'] = False
 
         # NOTE - instead of returning attentions here we return a special attention loss
         student_outputs = self.student_attn(*args, **kwargs)
         teacher_outputs = self.teacher_attn(*args, **kwargs)
-        assert self.attention_distillation_stage == 2
+        assert self.attention_distillation_stage == 1
         # special attention loss is the vector norm of the difference between the student and teacher attn outputs
         student_hidden_states = student_outputs[0]
         teacher_hidden_states = teacher_outputs[0]
@@ -274,7 +274,7 @@ def load_and_patch_model_with_attention_replacement(model_path:str, attn_classes
     attn_classes_dict = locate(attn_classes_path)
     attn_classes_dict_original_copy:dict = attn_classes_dict.copy()
     assert isinstance(attn_classes_dict, dict), 'could not find attention classes dict at path provided'
-    if attention_distillation_stage >= 3:
+    if attention_distillation_stage >= 2:
         for key in list(attn_classes_dict.keys()):
             attn_classes_dict[key] = ReplacementSelfAttentionType
 
@@ -285,7 +285,7 @@ def load_and_patch_model_with_attention_replacement(model_path:str, attn_classes
         attn_classes_dict[key] = value
 
     # patch model
-    if attention_distillation_stage == 2:
+    if attention_distillation_stage == 1:
         # requires_grad_(False) on entire model, so it acts as teacher
         model.requires_grad_(False)
 
@@ -298,7 +298,7 @@ def load_and_patch_model_with_attention_replacement(model_path:str, attn_classes
             student_attn = layer.self_attn.student_attn
             student_attn.requires_grad_(True)
 
-    elif attention_distillation_stage >= 3:
+    elif attention_distillation_stage >= 2:
         if model_config.tie_word_embeddings:
             # copy untied embeddings
             model.get_output_embeddings().weight = nn.Parameter(model.get_input_embeddings().weight.clone())

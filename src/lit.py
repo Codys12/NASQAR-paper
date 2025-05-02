@@ -104,7 +104,7 @@ class LightningModelWrapper(pl.LightningModule):
         do_reset = False
         if maybe_do_reset:
             if self.config.train is not None:
-                if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (1,2)):
+                if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (0,1)):
                     do_reset = True
 
         # we require that the module supports configure_model for this code to work well
@@ -137,7 +137,7 @@ class LightningModelWrapper(pl.LightningModule):
             if maybe_do_reset:
                 # NOTE - we do this on GPU because it's a lot faster! (even though it might not fit for truly giant models)
                 if self.config.train is not None:
-                    if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (1,2)):
+                    if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (0,1)):
                         print("Resetting parameters")
                         for submodule in model.modules():
                             if hasattr(submodule, 'reset_parameters'):
@@ -223,7 +223,7 @@ class LightningModelWrapper(pl.LightningModule):
             save_dict = save(model)
 
         # remove teacher attentions and move student attentions to self_attention after stage 2
-        if config.train.attention_distillation_stage == 2:
+        if config.train.attention_distillation_stage == 1:
             for k in list(save_dict.keys()):
                 if '.teacher_attn.' in k:
                     del save_dict[k]
@@ -266,13 +266,13 @@ class LightningModelWrapper(pl.LightningModule):
                 load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 
             # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
-            if config.train.attention_distillation_stage == 2:
+            if config.train.attention_distillation_stage == 1:
                 keys = list(load_dict.keys())
                 for k in keys:
                     if '.self_attn.' in k:
                         load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
-        strict = not config.train.load_partial #and config.train.attention_distillation_stage != 3
+        strict = not config.train.load_partial #and config.train.attention_distillation_stage != 2
 
         if 'deepspeed_stage_3' not in config.train.strategy:
             model.load_state_dict(load_dict, strict=strict)
@@ -464,7 +464,7 @@ class LightningModelWrapper(pl.LightningModule):
         #     first_occurrence = row_mask.argmax() if row_mask.any() else len(inverted_loss_mask[i])
         #     loss_mask[i, first_occurrence + 1:] = False
 
-        if self.training and self.config.train.attention_distillation_stage in (1, 21, 2):
+        if self.training and self.config.train.attention_distillation_stage in (0, 11, 1):
             stage = self.config.train.attention_distillation_stage
             output_attentions = stage == 1
             output_post_attention_hidden_states = stage in (21, 2)
@@ -495,7 +495,7 @@ class LightningModelWrapper(pl.LightningModule):
             next_model_state = last_model_state
         else:
             
-            if self.training and self.config.train.attention_distillation_stage == 33:
+            if self.training and self.config.train.attention_distillation_stage == 23:
                 results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
                 self.teacher.eval()
                 with torch.no_grad():
@@ -534,7 +534,7 @@ class LightningModelWrapper(pl.LightningModule):
                 logits = torch.tensor([], device=x.device)
                 return reported_loss, training_loss, logits, preds, last_model_state
 
-            # if self.training and self.config.train.attention_distillation_stage == 3:
+            # if self.training and self.config.train.attention_distillation_stage == 2:
             #     results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
             #     self.teacher.eval()
             #     with torch.no_grad():
@@ -571,7 +571,7 @@ class LightningModelWrapper(pl.LightningModule):
 
             reported_loss = training_loss = distillation_loss = ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
 
-            chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3, 31, 41)
+            chunk_loss_calcs = self.config.train.attention_distillation_stage in (-1, 2, 21, 31)
             chunk_len = 512
             n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
             if not self.training or self.teacher is None or self.config.train.teacher.ce_weight > 0:

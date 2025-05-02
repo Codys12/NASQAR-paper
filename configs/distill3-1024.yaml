@@ -1,25 +1,19 @@
 model:
-  attention_type: rwkv7_fla_chunk # rwkv7_wind_backstepping
-  ctx_len: 2048
+  ctx_len: 1024
 
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: rwkv7-4-2048
+  proj_suffix: 4-1k
   train_stage: 3
   load_partial: 0
 
   data_type: "binidx" 
   data_file: "data/dclm-10B" #"data/minipile_qwen2" 
-  #my_exit_tokens: 500000000 #1491785955
-  #magic_prime: 2929793 # 2913641 # 364193
-  #my_exit_tokens: 1500087317 
-  my_exit_tokens: 100000000
-  #magic_prime: 366227 # ctx4096
-  #magic_prime: 183089 # ctx8192
-  magic_prime: 732461
+  my_exit_tokens: 500000000 #1491785955
+  magic_prime: 1464917
 
-
+  optimizer: dsfusedadamw
   lr_wait: 0.8
   lr_decay_type: linear
   lr_init: 1e-5
@@ -32,16 +26,11 @@ train:
 
   devices: 8
   num_nodes: 1
-  micro_bsz: 2 #4
+  micro_bsz: 12
   accumulate_grad_batches: 1 # 96 total bsz
-  strategy: fsdp #deepspeed_stage_1
+  strategy: fsdp 
   grad_cp: 1
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
 
   epoch_save: 1
 
-#  attention_distillation_stage: 2
-  
-#  teacher:
-#    kl_weight: 1.0
-#    ce_weight: 0.0

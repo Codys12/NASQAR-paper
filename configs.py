@@ -104,7 +104,7 @@ class Train_Config:
     seed_everything:int = 1337
 
     teacher:TeacherConfig = None
-    attention_distillation_stage:int = 0
+    attention_distillation_stage:int = -1
 
     load_model:str = 'auto'
     wandb:str = ''
