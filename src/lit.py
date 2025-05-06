@@ -465,9 +465,8 @@ class LightningModelWrapper(pl.LightningModule):
         #     loss_mask[i, first_occurrence + 1:] = False
 
         if self.training and self.config.train.attention_distillation_stage in (0, 11, 1):
-            stage = self.config.train.attention_distillation_stage
-            output_attentions = stage == 1
-            output_post_attention_hidden_states = stage in (21, 2)
+            output_attentions = self.config.train.attention_distillation_stage == 0
+            output_post_attention_hidden_states = self.config.train.attention_distillation_stage in (11, 1)
             # special code for attention output and/or attention matrix loss
             if self.config.model.hf_path != '':
                 results = self.model.forward(x, output_hidden_states=False, output_attentions=True)
@@ -479,12 +478,12 @@ class LightningModelWrapper(pl.LightningModule):
                 results = self.model.forward(x, return_dict=False, attention_mask=causal_mask, output_hidden_states=False, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
             if self.config.model.hf_path == '':
-                if stage == 1:
+                if self.config.train.attention_distillation_stage == 0:
                     #repeated_loss_mask = loss_mask.repeat(len(results.attentions), 1)
                     training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0))
                     #training_loss = training_loss * repeated_loss_mask
                     training_loss = training_loss.float().mean() / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
-                else: # stage == 2:
+                else: # self.config.train.attention_distillation_stage == 1:
                     #repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
                     training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1)
                     #training_loss = training_loss * repeated_loss_mask

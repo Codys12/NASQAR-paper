@@ -32,7 +32,7 @@ train:
   num_nodes: 1
   micro_bsz: 4
   accumulate_grad_batches: 1 # 32 total bsz
-  strategy: fsdp #deepspeed_stage_1 #fsdp 
+  strategy: deepspeed_stage_1 #fsdp 
   grad_cp: 1
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
 
