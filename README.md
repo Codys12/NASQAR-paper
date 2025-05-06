@@ -1,54 +1,35 @@
-<div align="center" >
-    <img src="assets/goldfinch_mascot_256.jpg" height=256 alt="GoldFinch mascot" /> 
+# RADLADS 
+## Rapid Attention Distillation to Linear Attention Decoders at Scale
 
-# GoldFinch 
-## High Performance RWKV/Transformer Hybrid <br> with Linear Pre-Fill and Extreme KV-Cache Compression
+Paper link: https://arxiv.org/abs/ 
 
-Paper link: https://arxiv.org/abs/2407.12077 Checkpoints: https://huggingface.co/recursal/GoldFinch-paper
+Checkpoints: https://huggingface.co/collections/recursal/radlads-6818ee69e99e729ba8a87102
 
 </div>
 
-GoldFinch combines the best parts of Linear Attention (via RWKV) and traditional Transformers to create something that is better than either one on its own!
+RADLADS converts traditional softmax attention transformers to use linear attention variants that feature constant-time inference per token. This is accomplished via a three stage distillation process that maintains quality close to the original teacher model. Conversion can be accomplished with 700 million tokens or less of distillation training.
 
 <div align="center" >
-    <img src="assets/architecture.png" height=256 alt="GoldFinch architecture" /> 
+    <img src="assets/radlads_process.png" height=63 alt="RADLADS Conversion Process" /> 
 </div>
 
-Two of the biggest problems that transformers face are the quadratic slowdown from softmax attention, and the size of their KV-Cache. GoldFinch eliminates that slowdown for pre-fill, and reduces the KV-Cache size to the point where you'll barely notice it's there:
+We provide two new RWKV variants, RAD-RWKV6 and RAD-RWKV7, that provide an efficient destination architecture for transformer conversions. Our method achieves outstanding results, often with many fewer tokens of training than other methods:
 
 <div align="center" >
-    <img src="assets/kvcache_comparison.png" height=214 alt="KV-Cache comparison" /> 
+    <img src="assets/radlads_evals.png" height=275 alt="GoldFinch evals" /> 
 </div>
 
-This unlocks the potential for extremely large context lengths, without requiring large amounts of VRAM. Imagine putting in a whole codebase or stack of legal documents and asking questions about them. And if you happen to require only short answers you avoid most of the quadratic cost of attention. This is a major cost savings.
-
-And the best part is that in our experiments, GoldFinch **outperforms** larger sized models of Llama and Finch (RWKV-6) on downstream tasks!
-
-<div align="center" >
-    <img src="assets/evals.png" height=159 alt="GoldFinch evals" /> 
-</div>
-
-<div align="center" >
-    <img src="assets/wandb1B5_composite.png" height=256 alt="GoldFinch performance" /> 
-</div>
-
-You get the ability to look back at every single token that came in like a full Transformer, but without all the costs and with better downstream performance.
-
-We also provide the new Finch-C2, a higher downstream performance version of Finch (RWKV-6), and GPTAlpha, an enhanced full transformer architecture with RWKV components that uses softmax attention and outperforms traditional transformers.
-
-Please see the GoldFinch paper at https://arxiv.org/abs/2407.12077 for more details.
+Please see the RADLADS paper at https://arxiv.org/abs/ for more details.
 
 ## What's included in this repository
 
 - Reconfigurable Transformer base model code with support for carried state
 - Pluggable time and channel mixer component classes for several model architectures
-  - GoldFinch
-    - GOLD
-    - Finch-C2 (RWKV-6-C2)
-  - Eagle (RWKV-5)
-  - Finch (RWKV-6)
-  - GPTAlpha
-  - Llama-like (no GQA)
+  - RAD-RWKV6
+  - RAD-RWKV7
+  - Qwen2.5
+  - Qwen3
+- HuggingFace transformers conversion scripts and model code
 - simple config system
 - lightning based trainer
 - lm_eval_harness support
@@ -57,19 +38,18 @@ Please see the GoldFinch paper at https://arxiv.org/abs/2407.12077 for more deta
 ## setup
 
 ```
-pip install lightning==2.3.0 torch deepspeed==0.14.3 wandb ninja --upgrade
+pip install lightning torch flash-linear-attention triton deepspeed wandb ninja --upgrade
 ```
 
-you can download the minipile binidx via 
+You can download the DCLM binidx via 
 
 ```bash 
 mkdir -p data
-wget --continue -O data/minipile.idx https://huggingface.co/datasets/BlinkDL/minipile-tokenized/resolve/main/rwkv_vocab_v20230424/minipile.idx
-wget --continue -O data/minipile.bin https://huggingface.co/datasets/BlinkDL/minipile-tokenized/resolve/main/rwkv_vocab_v20230424/minipile.bin
+wget --continue -O data/dclm-10B.idx https://huggingface.co/datasets/recursal/DCLM-10B-Qwen2-binidx/resolve/main/dclm-10B.idx?download=true
+wget --continue -O data/dclm-10B.bin https://huggingface.co/datasets/recursal/DCLM-10B-Qwen2-binidx/resolve/main/dclm-10B.bin?download=true
 ```
 
-support for validation sets has been added
-to download the minipile validation set you'll need to run the supplied `get_minipile.py` and then obtain binidx conversion tool at https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5/make_data.py and run that
+You can also convert other datasets or examine the magic primes required for an existing bin/idx dataset using `python3 make_data_hf.py`
 
 ## configuration
 
@@ -89,7 +69,7 @@ see configs.py for specific configuration settings in dataclasses
 
 `model.inv_other_layer_ratio` is the ratio of second variety layers to all layers (e.g. 3 means 2/3 of the first variety and 1/3 of the second variety)
 
-Inherited from LinearAttentionArena, trainign is broken up into 'mini-batches' of 40320 samples, where a sample is the context length of the model.
+Inherited from LinearAttentionArena, training is broken up into 'mini-batches' of 40320 samples, where a sample is the context length of the model.
 `magic_prime` is used to pseudo-randomize the location of these samples within the dataset, and is calculated as below from the LinearAttentionArena documentation:
 
 ```
@@ -98,15 +78,32 @@ magic_prime = the largest 3n+2 prime smaller than datalen/ctxlen-1 (= 1498226207
 use https://www.dcode.fr/prime-numbers-search
 ```
 
+You can also examine the magic primes required for an existing bin/idx dataset using `python3 make_data_hf.py`
+
 ## running it
 
-to create the starting initial state for a model run prepare.py with --train.train_stage 1:
-`python train.py -c configs/L12D768ctx1024minipile.yaml -c configs/goldfinch.yaml --train.train_stage 1`
+### Example for Qwen2.5-7B-Instruct
 
-then to train the model:
-`python train.py -c configs/L12D768ctx1024minipile.yaml -c configs/goldfinch.yaml `
+Download Qwen/Qwen2.5-7B-Instruct from huggingface
+`huggingface-cli download Qwen/Qwen2.5-7B-Instruct`
 
-use `train.proj_dir`, `train.proj_name`, and `train.proj_suffix` to change dir from defaulting to something like `"out/" + "L12-D768-x060c2_gold" + "-0"`
+Convert to PTH format
+`python3 convert_hf_to_pth.py` YOUR_CACHED_HF_QWEN_MODEL_LOCATION out/Qwen2.5-7B-Instruct.pth
+
+RADLADS Step 0:
+`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/distill1.yaml --train.load_model out/Qwen2.5-7B-Instruct.pth`
+
+RADLADS Step 1:
+`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill2.yaml --train.load_model out/L28-D3584-qwerky7_qwen2-1/rwkv-final.pth`
+
+RADLADS Step 2:
+`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --train.load_model out/L28-D3584-qwerky7_qwen2-2/rwkv-final.pth`
+
+You can convert the resulting PTH files back to safetensors format for use with HF Transformers via
+`python3 convert_to_safetensors.py out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth RADRWKV7Qwen2.5-7B/model.safetensors`
+(note, you can list just a directory and it will emit chunked files instead of a single safetensors but sometimes HF has some issues with this and you have to convert to a single file first, and then from that to the chunks using this same convert_to_safetensors.py tool)
+
+The HF Transformers model code is provided in the rwkv6qwen2 and rwkv7qwen2 subdirectories. You can put together a working HF model mostly by copy-and-pasting. Full details are beyond the scope of this tutorial, but you can look at the pre-converted models to see how it's done.
 
 beware, it will continue from any numbered saved checkpoints still in the directory (if running again in the same dir)
 
@@ -117,16 +114,16 @@ and dragon_test.py which can be used to run a quick inference test, also with th
 
 ## Citation
 
-If you use this code or find our work valuable, please consider citing GoldFinch:
+If you use this code or find our work valuable, please consider citing RADLADS:
 
 ```bibtex
-@misc{goldstein2024goldfinchhighperformancerwkvtransformer,
-      title={GoldFinch: High Performance RWKV/Transformer Hybrid with Linear Pre-Fill and Extreme KV-Cache Compression}, 
-      author={Daniel Goldstein and Fares Obeid and Eric Alcaide and Guangyu Song and Eugene Cheah},
+@misc{,
+      title={RADLADS: Rapid Attention Distillation to Linear Attention Decoders at Scale}, 
+      author={},
       year={2024},
-      eprint={2407.12077},
+      eprint={},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2407.12077}, 
+      url={https://arxiv.org/abs/}, 
 }
 ```
