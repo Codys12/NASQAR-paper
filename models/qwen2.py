@@ -1024,14 +1024,12 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
 
-        # k = k.view(B,T,H,-1).float()
-        # k = (k / (torch.norm(k, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-        # kk = k
-        #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        #kk = (k * self.k_k).view(B,T,H,-1).float()
-        kk = (k).view(B,T,H,-1).float()
-        kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-        #k = k * (1 + (a-1) * self.k_a)
+        if self.config.balance_state:
+            kk = k.view(B,T,H,-1).float()
+            kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+        else:
+            kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
+            k = k * (1 + (a-1) * self.k_a)
 
         if self.layer_id == 0:
             v_first = v
@@ -1040,8 +1038,6 @@ class TMix_qwen2rwkv7(TMix_qwen2):
 
         z = -kk
         b = kk*a
-        #z = b = torch.zeros_like(k)
-        w = (-log_neglog_w.exp()).exp()
         # s'^T = ws^T-as^Tkk^T+avk^T, and I assume k is normalized
         # the left part removes 1-w 'values'  via multiplication
         # the middle part removes a 'values'
@@ -1051,6 +1047,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # leaving us with the revised recurrence formula:
         # s'^T = ws^T-as^Tkk^T+(1-w+a)vk^T, and I assume k is normalized
         if self.config.balance_state:
+            w = (-log_neglog_w.exp()).exp()
             k = k * (1-w+a)
         r,log_neglog_w,k,v,z,b = [i.to(torch.bfloat16).view(B,T,H,-1) for i in [r,log_neglog_w,k,v,z,b]]
         x = RUN_CUDA_RWKV7g(r, log_neglog_w, k, v, z, b)

@@ -461,21 +461,11 @@ class RWKV7Attention(nn.Module):
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-        use_alt = True
-
-        #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        #kk = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
-        #kk = k.view(B,T,H,-1)
-        #kk = (kk.float() / (torch.norm(kk.float(), dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-
-        if use_alt:
-            kk = torch.nn.functional.normalize((k).view(B,T,H,-1), dim=-1, p=2.0, eps=self.head_dim*1e-5).view(B,T,-1)
+        if self.config.balance_state:
+            kk = torch.nn.functional.normalize(k.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         else:
-            kk = (k * self.k_k).view(B,T,H,-1).float()
-            kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+            kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
             k = k * (1 + (a-1) * self.k_a)
-        # a = 1 + (a-1) * self.k_a
-        # k = k * a
         if self.layer_idx == 0: v_first = v
         else: v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)        
 
@@ -499,11 +489,9 @@ class RWKV7Attention(nn.Module):
         log_neglog_w = - 0.5 - torch.nn.functional.softplus(-w_lora_result)
         log_w = -log_neglog_w.float().exp()
 
-        #if use_alt:
         if self.config.balance_state:
             w = log_w.exp()
             k = k * (1-w+a)
-            #k = kk * (a*w+1-w)
 
         r,log_w,k,v,kk,a = [i.view(B,T,self.num_heads,-1) for i in [r,log_w,k,v,kk,a]]
         if self.training:
