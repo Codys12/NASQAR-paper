@@ -1119,7 +1119,7 @@ class Qwen2DecoderLayer(nn.Module):
 
         self.teacher_attn = None
         if config.train is not None:
-            if config.train.attention_distillation_stage in (1, 21, 2):
+            if config.train.attention_distillation_stage in (0, 11, 1):
                 self.teacher_attn = TMix_qwen2(args, layer_id)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
@@ -1269,10 +1269,10 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
     def set_grads(self):
         train_config = self.config.train
         if train_config is not None:
-            if train_config.attention_distillation_stage in (1, 21, 2):
+            if train_config.attention_distillation_stage in (0, 11, 1):
                 self.requires_grad_(False)
                 for decoder_layer in self.model.layers:
-                    if train_config.attention_distillation_stage == 1:
+                    if train_config.attention_distillation_stage == 0:
                         decoder_layer.self_attn.time_maa_x.requires_grad_(True)
                         decoder_layer.self_attn.time_maa_r.requires_grad_(True)
                         decoder_layer.self_attn.time_maa_k.requires_grad_(True)
@@ -1285,21 +1285,21 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                         # FIXME - wow we removed q, k here by accident and it.. helped??!?!
                         # decoder_layer.self_attn.q_proj.requires_grad_(True)
                         # decoder_layer.self_attn.k_proj.requires_grad_(True)
-                    elif train_config.attention_distillation_stage == 21:
+                    elif train_config.attention_distillation_stage == 11:
                         decoder_layer.self_attn.requires_grad_(True)
                         #decoder_layer.self_attn.q_proj.requires_grad_(False)
                         #decoder_layer.self_attn.k_proj.requires_grad_(False)
                         # decoder_layer.self_attn.v_proj.requires_grad_(False)
                         # decoder_layer.self_attn.o_proj.requires_grad_(False)
-                    elif train_config.attention_distillation_stage == 2:
+                    elif train_config.attention_distillation_stage == 1:
                         decoder_layer.self_attn.requires_grad_(True)
                         # decoder_layer.self_attn.k_proj.requires_grad_(False)
                         # decoder_layer.self_attn.v_proj.requires_grad_(False)
-            elif train_config.attention_distillation_stage == 31:
+            elif train_config.attention_distillation_stage == 21:
                 self.requires_grad_(False)
                 for decoder_layer in self.model.layers:
                     decoder_layer.self_attn.requires_grad_(True)
-            elif train_config.attention_distillation_stage == 41:
+            elif train_config.attention_distillation_stage == 31:
                 self.requires_grad_(False)
                 for decoder_layer in self.model.layers:
                     decoder_layer.self_attn.time_maa_w.requires_grad_(True)
@@ -1308,19 +1308,19 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.time_decay.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
-            # elif train_config.attention_distillation_stage == 3:
+            # elif train_config.attention_distillation_stage == 2:
             #     layer_id = -1
             #     for decoder_layer in self.model.layers:
             #         layer_id += 1
             #         if layer_id >= self.config.model.n_layer - self.config.model.preserve_last_n_layers:
             #             decoder_layer.requires_grad_(False)
 
-            # elif train_config.attention_distillation_stage == 3:
+            # elif train_config.attention_distillation_stage == 2:
             #     # Harrison's possible fix for v_first explosion during stage 3
             #     for decoder_layer in self.model.layers:
             #         decoder_layer.self_attn.v_proj.requires_grad_(False)
             #         break
-            # elif train_config.attention_distillation_stage == 3:
+            # elif train_config.attention_distillation_stage == 2:
             #     self.requires_grad_(False)
             #     # self.model.embed_tokens.requires_grad_(False)
             #     # self.model.norm.requires_grad_(False)
@@ -1388,7 +1388,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         param_dict = {n: p for n, p in self.named_parameters()}
         #param_check = list(lr_decay) + list(lr_1x) + list(lr_fp32)
-        #if not train_config.load_partial and (train_config.teacher is None or train_config.teacher.attention_distillation_stage ==3):
+        #if not train_config.load_partial and (train_config.teacher is None or train_config.teacher.attention_distillation_stage == 2):
         #    assert sorted(param_dict) == sorted(param_check)
 
         lr_decay = sorted(list(lr_decay))
