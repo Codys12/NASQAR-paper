@@ -1,3 +1,0 @@
-model:
-    __type__: configs.Transformer_Config
-    tmix: x060
