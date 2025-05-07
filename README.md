@@ -26,7 +26,6 @@ Please see the RADLADS paper at https://arxiv.org/abs/2505.03005 for more detail
   - RAD-RWKV6
   - RAD-RWKV7
   - Qwen2.5
-  - Qwen3
 - HuggingFace transformers conversion scripts and model code
 - simple config system
 - lightning based trainer
