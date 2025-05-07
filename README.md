@@ -1,11 +1,9 @@
 # RADLADS 
 ## Rapid Attention Distillation to Linear Attention Decoders at Scale
 
-Paper link: https://arxiv.org/abs/ 
+Paper link: https://arxiv.org/abs/2505.03005 
 
 Checkpoints: https://huggingface.co/collections/recursal/radlads-6818ee69e99e729ba8a87102
-
-</div>
 
 RADLADS converts traditional softmax attention transformers to use linear attention variants that feature constant-time inference per token. This is accomplished via a three stage distillation process that maintains quality close to the original teacher model. Conversion can be accomplished with 700 million tokens or less of distillation training.
 
@@ -19,7 +17,7 @@ We provide two new RWKV variants, RAD-RWKV6 and RAD-RWKV7, that provide an effic
     <img src="assets/radlads_evals.png" height=275 alt="GoldFinch evals" /> 
 </div>
 
-Please see the RADLADS paper at https://arxiv.org/abs/ for more details.
+Please see the RADLADS paper at https://arxiv.org/abs/2505.03005 for more details.
 
 ## What's included in this repository
 
@@ -117,13 +115,13 @@ and dragon_test.py which can be used to run a quick inference test, also with th
 If you use this code or find our work valuable, please consider citing RADLADS:
 
 ```bibtex
-@misc{,
+@misc{goldstein2025radladsrapidattentiondistillation,
       title={RADLADS: Rapid Attention Distillation to Linear Attention Decoders at Scale}, 
-      author={},
-      year={2024},
-      eprint={},
+      author={Daniel Goldstein and Eric Alcaide and Janna Lu and Eugene Cheah},
+      year={2025},
+      eprint={2505.03005},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/}, 
+      url={https://arxiv.org/abs/2505.03005}, 
 }
 ```
