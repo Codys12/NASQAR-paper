@@ -27,6 +27,8 @@ class Model_Config:
     rms_norm_eps:float = 1e-06
     vocab_padding_idx:int|None = None
 
+    bitlinear:int = 0
+
 
 @dataclass(kw_only=True)
 class RoPE_Config:
