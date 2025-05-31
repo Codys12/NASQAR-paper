@@ -87,6 +87,22 @@ Download Qwen/Qwen2.5-7B-Instruct from huggingface
 Convert to PTH format
 `python3 convert_hf_to_pth.py` YOUR_CACHED_HF_QWEN_MODEL_LOCATION out/Qwen2.5-7B-Instruct.pth
 
+### Downloading pretrained RADLADS checkpoints
+
+Intermediate checkpoints for the later distillation stages are hosted on
+[HuggingFace](https://huggingface.co/collections/recursal/radlads-6818ee69e99e729ba8a87102).
+You can retrieve them with `huggingface-cli` and place them in the `out` directory
+before running the final BitNet distillation stage. For example:
+
+```bash
+huggingface-cli download recursal/radlads-7b-various L28-D3584-qwerky7_qwen2-3.pth --local-dir out --local-dir-use-symlinks=False
+mkdir -p out/L28-D3584-qwerky7_qwen2-3
+mv out/L28-D3584-qwerky7_qwen2-3.pth out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth
+```
+
+This produces `out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth`, which is the teacher
+checkpoint required by Stage 3 below.
+
 RADLADS Step 0:
 `RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/distill1.yaml --train.load_model out/Qwen2.5-7B-Instruct.pth`
 

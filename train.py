@@ -90,9 +90,20 @@ if __name__ == "__main__":
                             pass
         list_p.sort()
         if len(list_p) == 0:
-            print(f"No correctly named rwkv-*.pth file found in {config.runtime.proj_path}")
-            exit(-1)
-        max_p = list_p[-1]
+            teacher_path = None
+            if getattr(config.train, 'teacher', None) is not None:
+                teacher_path = getattr(config.train.teacher, 'path', '')
+            if teacher_path and os.path.exists(teacher_path):
+                print(
+                    f"No checkpoint found in {config.runtime.proj_path}. Using teacher weights from {teacher_path}."
+                )
+                config.train.load_model = teacher_path
+            else:
+                print(f"No correctly named rwkv-*.pth file found in {config.runtime.proj_path}")
+                exit(-1)
+            max_p = -1
+        else:
+            max_p = list_p[-1]
         if len(list_p) > 1:
             runtime_config.my_pile_prev_p = list_p[-2]  # in case max_p is corrupted
         if max_p == -1:
