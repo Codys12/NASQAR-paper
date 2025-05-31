@@ -183,6 +183,11 @@ class Transformer(nn.Module):
         #if self.training and hasattr(config, 'train') and config.train is not None and (getattr(config.train, 'load_partial', 0) or getattr(config.train, 'train_stage', 0) == 0):
         #    self.init_weights()
 
+    def configure_model(self):
+        if getattr(self.config.model, 'bitlinear', 0):
+            from .bitlinear import replace_linear_with_bitlinear
+            replace_linear_with_bitlinear(self)
+
     def ckpt(self, block, *block_args):
         if block.training and self.config.train.grad_cp == 1:
             if "deepspeed" in self.config.train.strategy:

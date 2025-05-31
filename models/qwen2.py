@@ -1259,12 +1259,16 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         self.model = None
 
     def configure_model(self):
-        if self.model is not None: 
+        if self.model is not None:
             return
 
         self.model = Qwen2Decoder(self.config)
 
         self.lm_head = nn.Linear(self.config.model.n_embd, self.config.model.vocab_size, bias=False)
+
+        if getattr(self.config.model, 'bitlinear', 0):
+            from src.bitlinear import replace_linear_with_bitlinear
+            replace_linear_with_bitlinear(self)
 
     def set_grads(self):
         train_config = self.config.train
