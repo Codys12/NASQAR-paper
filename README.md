@@ -95,12 +95,12 @@ You can retrieve them with `huggingface-cli` and place them in the `out` directo
 before running the final BitNet distillation stage. For example:
 
 ```bash
-huggingface-cli download recursal/radlads-7b-various L28-D3584-qwerky7_qwen2-3.pth --local-dir out --local-dir-use-symlinks=False
-mkdir -p out/L28-D3584-qwerky7_qwen2-3
-mv out/L28-D3584-qwerky7_qwen2-3.pth out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth
+huggingface-cli download recursal/radlads-7b-various L28-D3584-qwerky7_qwen2-3-4k.pth --local-dir out --local-dir-use-symlinks=False
+mkdir -p out/L28-D3584-qwerky7_qwen2-3-4k
+mv out/L28-D3584-qwerky7_qwen2-3-4k.pth out/L28-D3584-qwerky7_qwen2-3-4k/rwkv-final.pth
 ```
 
-This produces `out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth`, which is the teacher
+This produces `out/L28-D3584-qwerky7_qwen2-3-4k/rwkv-final.pth`, which is the teacher
 checkpoint required by Stage 3 below.
 
 RADLADS Step 0:
@@ -113,10 +113,10 @@ RADLADS Step 2:
 `RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --train.load_model out/L28-D3584-qwerky7_qwen2-2/rwkv-final.pth`
 
 RADLADS Step 3 (BitNet KD):
-`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --model.bitlinear 1 --train.train_stage 4 --train.teacher.path out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth`
+`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --model.bitlinear 1 --train.train_stage 4 --train.teacher.path out/L28-D3584-qwerky7_qwen2-3-4k/rwkv-final.pth`
 
 You can convert the resulting PTH files back to safetensors format for use with HF Transformers via
-`python3 convert_to_safetensors.py out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth RADRWKV7Qwen2.5-7B/model.safetensors`
+`python3 convert_to_safetensors.py out/L28-D3584-qwerky7_qwen2-3-4k/rwkv-final.pth RADRWKV7Qwen2.5-7B/model.safetensors`
 (note, you can list just a directory and it will emit chunked files instead of a single safetensors but sometimes HF has some issues with this and you have to convert to a single file first, and then from that to the chunks using this same convert_to_safetensors.py tool)
 
 The HF Transformers model code is provided in the rwkv6qwen2 and rwkv7qwen2 subdirectories. You can put together a working HF model mostly by copy-and-pasting. Full details are beyond the scope of this tutorial, but you can look at the pre-converted models to see how it's done.
