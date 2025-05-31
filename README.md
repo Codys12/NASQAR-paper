@@ -96,6 +96,9 @@ RADLADS Step 1:
 RADLADS Step 2:
 `RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --train.load_model out/L28-D3584-qwerky7_qwen2-2/rwkv-final.pth`
 
+RADLADS Step 3 (BitNet KD):
+`RWKV_TORCH_COMPILE=0 RWKV_JIT_ON=0 python3 train.py -c configs/qwen7b.yaml -c configs/qwerky7.yaml -c configs/qwen7binstructteacher.yaml -c configs/distill3.yaml --model.bitlinear 1 --train.train_stage 4 --train.teacher.path out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth`
+
 You can convert the resulting PTH files back to safetensors format for use with HF Transformers via
 `python3 convert_to_safetensors.py out/L28-D3584-qwerky7_qwen2-3/rwkv-final.pth RADRWKV7Qwen2.5-7B/model.safetensors`
 (note, you can list just a directory and it will emit chunked files instead of a single safetensors but sometimes HF has some issues with this and you have to convert to a single file first, and then from that to the chunks using this same convert_to_safetensors.py tool)
