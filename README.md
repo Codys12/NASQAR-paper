@@ -36,7 +36,11 @@ Please see the RADLADS paper at https://arxiv.org/abs/2505.03005 for more detail
 
 ```
 pip install lightning torch flash-linear-attention triton deepspeed wandb ninja --upgrade
+git clone https://github.com/QwenLM/Qwen2
+pip install -e ./Qwen2
 ```
+
+`train.py` and `run_lm_eval_hf.py` import `Qwen2Config` and `Qwen2ForCausalLM` from this library, so the installation step above is required before running these scripts.
 
 You can download the DCLM binidx via 
 
